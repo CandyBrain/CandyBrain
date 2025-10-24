@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>KIST Control Panel - 설정값 복원 완료</title>
+<style>
+  /* ===== iOS 터치 최적화 - 최상단 ===== */
+  button, select, input, label, .slider {
+    touch-action: manipulation;
+  }
+  
+  button, input[type="checkbox"], input[type="number"] {
+    -webkit-appearance: none;
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+  }
+  
+  select {
+    -webkit-tap-highlight-color: transparent;
+    cursor: pointer;
+  }
+  
+  button:active {
+    opacity: 0.7;
+    transition: opacity 0.1s;
+  }
+
+  /* ===== 공통 스타일 ===== */
+  .switch { position: relative; display: inline-block; width: 50px !important; height: 25px; min-width: 0 !important; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; }
+  .slider:before { position: absolute; content: 'M'; height: 22px; width: 22px; left: 1px; bottom: 1px; background-color: white; transition: .4s; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: #333; }
+  input:checked + .slider { background-color: #87CEEB; }
+  input:checked + .slider:before { content: 'A'; transform: translateX(25px); }
+  .slider.round { border-radius: 34px; }
+  .slider.round:before { border-radius: 50%; }
+
+  .control-row { display: flex; align-items: center; gap: 15px; margin: 10px 0; padding: 10px; border: 1px solid #87CEEB; border-radius: 5px; }
+  .control-row label { min-width: 100px; font-weight: bold; }
+  .control-row input[type='number'] { width: 120px; padding: 5px; border: 1px solid #87CEEB; }
+  .control-row button { padding: 5px 10px; border: none; border-radius: 3px; cursor: pointer; }
+  .control-row button:hover { background: #1e40af; color:#fff; }
+  .status-text { margin-left: 10px; font-weight: bold; }
+  .control-buttons { display: flex; gap: 5px; margin-left: 12px; }
+  .control-buttons button.inactive { background-color: #d3d3d3 !important; color: #666 !important; }
+  .control-buttons button.active { background-color: #1e3a8a !important; color:#fff !important; }
+  .control-row button[type="submit"] { background-color: #1e3a8a; color: #ffffff; font-weight: bold; margin-left: auto; }
+  .control-row button[type="submit"]:active { background-color: #1e40af; }
+
+  .error-message { color: red; margin-left: 10px; display: none; }
+  .chamber-select { margin: 10px 0; padding: 10px; border: 1px solid #87CEEB; border-radius: 5px; display: flex; align-items: center; }
+  .chamber-select label { margin-right: 10px; font-weight: bold; }
+  .chamber-select select { width: 150px; height: 30px; padding: 5px; font-size: 14px; border: 1px solid #87CEEB; border-radius: 3px; cursor: pointer; }
+
+  #damper_params_row.led-grid, #led_params_row.led-grid {
+    display: grid;
+    grid-template-columns: 100px 1fr auto;
+    gap: 10px 16px;
+    align-items: center;
+  }
+  #damper_params_row .row-title, #led_params_row .row-title {
+    font-weight: bold;
+  }
+  #damper_params_row .content, #led_params_row .content {
+    display: grid;
+    grid-template-columns: 200px 200px;
+    gap: 12px;
+    align-items: center;
+  }
+  #damper_params_row input[type='number'], #led_params_row input[type='number'] { width: 100px; border: 1px solid #87CEEB; }
+  
+  .field-pair {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    align-items: center;
+    gap: 5px;
+  }
+  .fld { font-size:12px; color:#555; font-weight:600; }
+
+  #damper_params_set_btn, #led_params_set_btn { background:#1e3a8a; color:#fff; border:none; font-weight:700; padding: 10px 20px; }
+  #damper_params_set_btn:hover, #led_params_set_btn:hover { background:#1e40af; }
+
+  .restore-status {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: #4CAF50;
+    color: white;
+    padding: 10px 15px;
+    border-radius: 5px;
+    font-size: 14px;
+    display: none;
+    z-index: 1000;
+  }
+  .restore-status.error {
+    background: #f44336;
+  }
+
+  @media (max-width: 700px) {
+    #damper_params_row.led-grid, #led_params_row.led-grid {
+      grid-template-columns: 1fr;
+    }
+    #damper_params_row .content, #led_params_row .content { 
+      grid-template-columns: 1fr; 
+    }
+  }
+</style>
+</head>
+<body>
+
+<div id="restoreStatus" class="restore-status"></div>
+
+<div>
+  <!-- 챔버 선택 -->
+  <div class="chamber-select">
+    <label for="chamberSelect">챔버 선택:</label>
+    <select id="chamberSelect">
+      <option value="chamber_001">chamber_001</option>
+      <option value="chamber_002">chamber_002</option>
+      <option value="chamber_003">chamber_003</option>
+      <option value="chamber_004">chamber_004</option>
+    </select>
+  </div>
+
+  <!-- LED 제어 -->
+  <div class="control-row" id="led_drive_row">
+    <label>LED 제어:</label>
+    <label class="switch"><input type="checkbox" name="led_drive_mode"><span class="slider round"></span></label>
+    <span class="status-text" id="led_drive_status">수동</span>
+    <div class="control-buttons" id="led_drive_buttons">
+      <button type="button" data-control="led_drive" data-state="ON">ON</button>
+      <button type="button" data-control="led_drive" data-state="OFF">OFF</button>
+    </div>
+    <span class="error-message" id="led_drive_error"></span>
+  </div>
+
+  <!-- 배기팬 -->
+  <div class="control-row" id="exhaust_fan_row">
+    <label>배기팬:</label>
+    <label class="switch"><input type="checkbox" name="exhaust_fan_mode"><span class="slider round"></span></label>
+    <span class="status-text" id="exhaust_fan_status">수동</span>
+    <div class="control-buttons" id="exhaust_fan_buttons">
+      <button type="button" data-control="exhaust_fan" data-state="ON">ON</button>
+      <button type="button" data-control="exhaust_fan" data-state="OFF">OFF</button>
+    </div>
+    <span class="error-message" id="exhaust_fan_error"></span>
+  </div>
+
+  <!-- 에어댐퍼 -->
+  <div class="control-row" id="air_damper_row">
+    <label>에어댐퍼:</label>
+    <label class="switch"><input type="checkbox" name="air_damper_mode"><span class="slider round"></span></label>
+    <span class="status-text" id="air_damper_status">수동</span>
+    <div class="control-buttons" id="air_damper_buttons">
+      <button type="button" data-control="air_damper" data-state="ON">ON</button>
+      <button type="button" data-control="air_damper" data-state="OFF">OFF</button>
+    </div>
+    <span class="error-message" id="air_damper_error"></span>
+  </div>
+
+  <!-- 에어댐퍼 자동제어 설정 -->
+  <div class="control-row led-grid" id="damper_params_row">
+    <label class="row-title">댐퍼 설정:</label>
+    <div class="content">
+      <div class="field-pair">
+        <label class="fld">설정온도(°C)</label>
+        <input type="number" id="damper_tempSetPoint" step="0.1" placeholder="예: 25.0" />
+      </div>
+      <div class="field-pair">
+        <label class="fld">단위시간(분)</label>
+        <input type="number" id="damper_avgTimeAD" placeholder="예: 10" />
+      </div>
+    </div>
+    <button id="damper_params_set_btn" type="button">SET</button>
+    <span class="error-message" id="damper_params_error"></span>
+  </div>
+
+  <!-- LED 설정 -->
+  <div class="control-row led-grid" id="led_params_row">
+    <label class="row-title">LED 설정:</label>
+    <div class="content">
+      <div class="field-pair">
+        <label class="fld">기준일사량 (W/m^2)</label>
+        <input type="number" id="led_lightSetPoint" step="0.1" placeholder="예: 300" />
+      </div>
+      <div class="field-pair">
+        <label class="fld">단위시간(분)</label>
+        <input type="number" id="led_avg_time" placeholder="예: 15" />
+      </div>
+    </div>
+    <button id="led_params_set_btn" type="button">SET</button>
+    <span class="error-message" id="led_params_error"></span>
+  </div>
+
+</div>
+
+<!-- 숨은 폼들 -->
+<form id="exhaust_fan_form" style="display:none;">
+  <input type="hidden" name="controlType" value="exhaust_fan">
+  <input type="hidden" name="chamber_id" value="chamber_001">
+  <input type="hidden" name="mode" id="exhaust_fan_mode_value">
+  <input type="hidden" name="onoffValue" id="exhaust_fan_onoffValue">
+</form>
+<form id="air_damper_form" style="display:none;">
+  <input type="hidden" name="controlType" value="air_damper">
+  <input type="hidden" name="chamber_id" value="chamber_001">
+  <input type="hidden" name="mode" id="air_damper_mode_value">
+  <input type="hidden" name="onoffValue" id="air_damper_onoffValue">
+</form>
+<form id="led_drive_form" style="display:none;">
+  <input type="hidden" name="controlType" value="led_drive">
+  <input type="hidden" name="chamber_id" value="chamber_001">
+  <input type="hidden" name="mode" id="led_drive_mode_value">
+  <input type="hidden" name="onoffValue" id="led_drive_onoffValue">
+  <input type="hidden" name="lightSetPoint" id="led_drive_lightSetPoint">
+  <input type="hidden" name="avg_time" id="led_drive_avg_time">
+</form>
+
+<script>
+(function() {
+  let lastTap = 0;
+  
+  document.addEventListener('touchend', function(e) {
+    const target = e.target;
+    
+    if (target.tagName === 'SELECT') {
+      return;
+    }
+    
+    const now = Date.now();
+    
+    if (now - lastTap < 300) {
+      e.preventDefault();
+      return;
+    }
+    
+    lastTap = now;
+    
+    if (target.tagName === 'BUTTON' || 
+        target.type === 'checkbox' ||
+        target.classList.contains('slider')) {
+      
+      target.style.opacity = '0.7';
+      setTimeout(() => { target.style.opacity = ''; }, 100);
+      
+      const clickEvent = new MouseEvent('click', {
+        view: window,
+        bubbles: true,
+        cancelable: true
+      });
+      target.dispatchEvent(clickEvent);
+    }
+  }, {passive: false, capture: true});
+})();
+
+
+// const API_BASE = 'http://candybrain.ddns.net:1881';
+const API_BASE = window.location.protocal + '//' + window.location.hostname + ':1880';
+
+const getChamber = () => document.getElementById('chamberSelect')?.value || 'chamber_001';
+const inFlight = new Set();
+
+function showRestoreStatus(message, isError = false) {
+  const status = document.getElementById('restoreStatus');
+  status.textContent = message;
+  status.className = 'restore-status' + (isError ? ' error' : '');
+  status.style.display = 'block';
+  setTimeout(() => { status.style.display = 'none'; }, 3000);
+}
+
+function lockControl(ct, locked){
+  const row = document.getElementById(`${ct}_row`);
+  if (!row) return;
+  row.querySelectorAll('button').forEach(b => b.disabled = locked);
+}
+
+function showTransientMessage(el, text, isError){
+  if (!el) return;
+  el.style.display = 'inline';
+  el.textContent = text;
+  el.style.color = isError ? 'red' : '#2e7d32';
+  setTimeout(() => { el.style.display = 'none'; el.textContent = ''; }, 1200);
+}
+
+function applyBtnStyles(btn, isActive) {
+  if (!btn) return;
+  if (isActive) { 
+    btn.classList.add('active'); 
+    btn.classList.remove('inactive'); 
+  } else { 
+    btn.classList.add('inactive'); 
+    btn.classList.remove('active'); 
+  }
+}
+
+function clearBtnStyles(btn){ 
+  if (!btn) return; 
+  btn.classList.remove('active','inactive'); 
+}
+
+function updateButtonState(controlType, activeState) {
+  const buttonsDiv = document.getElementById(`${controlType}_buttons`);
+  if (!buttonsDiv) return;
+  const [onBtn, offBtn] = buttonsDiv.querySelectorAll('button');
+  if (activeState === 'ON') { 
+    applyBtnStyles(onBtn, true); 
+    applyBtnStyles(offBtn, false); 
+  } else if (activeState === 'OFF') { 
+    applyBtnStyles(onBtn, false); 
+    applyBtnStyles(offBtn, true); 
+  } else { 
+    clearBtnStyles(onBtn); 
+    clearBtnStyles(offBtn); 
+  }
+}
+
+function callControl(params, errorEl, okMsg){
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k,v])=>{ 
+    if (v !== undefined && v !== null && v !== '') qs.append(k, v); 
+  });
+  qs.append('chamber_id', getChamber());
+  qs.append('_nonce', Date.now());
+
+  const ct = params.controlType;
+  if (ct && inFlight.has(ct)) return Promise.resolve();
+  if (ct) { inFlight.add(ct); lockControl(ct, true); }
+
+  return fetch(`${API_BASE}/control?${qs.toString()}`, { method: 'GET', cache: 'no-store' })
+    .then(r => { 
+      if (!r.ok) return r.json().then(d=>{ throw new Error(d.error||('HTTP '+r.status)); }); 
+      return r.json().catch(()=>({ok:true})); 
+    })
+    .then(() => { 
+      if (errorEl){ showTransientMessage(errorEl, okMsg || '적용되었습니다', false); } 
+    })
+    .catch(err => { 
+      if (errorEl){ 
+        errorEl.style.display='inline'; 
+        errorEl.style.color='red'; 
+        errorEl.textContent=`에러: ${err.message}`; 
+      } 
+    })
+    .finally(() => { 
+      if (ct) { inFlight.delete(ct); lockControl(ct, false); } 
+    });
+}
+
+function loadSettings(){
+  console.log('설정값 복원 시작');
+  
+  fetch(`${API_BASE}/settings/latest?chamber_id=${encodeURIComponent(getChamber())}`, {
+      cache: 'no-store'
+  })
+  .then(r => r.json())
+  .then(res => {
+      console.log('설정 응답:', res);
+      
+      if (res && res.settings) {
+          const S = res.settings;
+          
+          if (S.led_drive) {
+              const led = S.led_drive;
+              const ledSwitch = document.querySelector('input[name="led_drive_mode"]');
+              if (ledSwitch) ledSwitch.checked = (led.mode === 'auto');
+              
+              const statusText = document.getElementById('led_drive_status');
+              if (statusText) statusText.textContent = led.mode === 'auto' ? '자동' : '수동';
+              
+              const buttonsDiv = document.getElementById('led_drive_buttons');
+              if (buttonsDiv) {
+                  buttonsDiv.style.display = (led.mode === 'auto') ? 'none' : 'flex';
+              }
+              
+              const hiddenMode = document.getElementById('led_drive_mode_value');
+              const hiddenOnoff = document.getElementById('led_drive_onoffValue');
+              if (hiddenMode) hiddenMode.value = led.mode || 'manual';
+              if (hiddenOnoff) hiddenOnoff.value = led.onoffValue || 'OFF';
+              
+              updateButtonState('led_drive', led.onoffValue);
+              
+              if (led.setPoint !== undefined) {
+                  document.getElementById('led_lightSetPoint').value = led.setPoint;
+              }
+              if (led.avgTime !== undefined) {
+                  document.getElementById('led_avg_time').value = led.avgTime;
+              }
+          }
+          
+          if (S.exhaust_fan) {
+              const fan = S.exhaust_fan;
+              const fanSwitch = document.querySelector('input[name="exhaust_fan_mode"]');
+              if (fanSwitch) fanSwitch.checked = (fan.mode === 'auto');
+              
+              const statusText = document.getElementById('exhaust_fan_status');
+              if (statusText) statusText.textContent = fan.mode === 'auto' ? '자동' : '수동';
+              
+              const buttonsDiv = document.getElementById('exhaust_fan_buttons');
+              if (buttonsDiv) {
+                  buttonsDiv.style.display = (fan.mode === 'auto') ? 'none' : 'flex';
+              }
+              
+              const hiddenMode = document.getElementById('exhaust_fan_mode_value');
+              const hiddenOnoff = document.getElementById('exhaust_fan_onoffValue');
+              if (hiddenMode) hiddenMode.value = fan.mode || 'manual';
+              if (hiddenOnoff) hiddenOnoff.value = fan.onoffValue || 'OFF';
+              
+              updateButtonState('exhaust_fan', fan.onoffValue);
+          }
+          
+          if (S.air_damper) {
+              const damper = S.air_damper;
+              const damperSwitch = document.querySelector('input[name="air_damper_mode"]');
+              if (damperSwitch) damperSwitch.checked = (damper.mode === 'auto');
+              
+              const statusText = document.getElementById('air_damper_status');
+              if (statusText) statusText.textContent = damper.mode === 'auto' ? '자동' : '수동';
+              
+              const buttonsDiv = document.getElementById('air_damper_buttons');
+              if (buttonsDiv) {
+                  buttonsDiv.style.display = (damper.mode === 'auto') ? 'none' : 'flex';
+              }
+              
+              const hiddenMode = document.getElementById('air_damper_mode_value');
+              const hiddenOnoff = document.getElementById('air_damper_onoffValue');
+              if (hiddenMode) hiddenMode.value = damper.mode || 'manual';
+              if (hiddenOnoff) hiddenOnoff.value = damper.onoffValue || 'OFF';
+              
+              updateButtonState('air_damper', damper.onoffValue);
+              
+              if (damper.setPoint !== undefined) {
+                  document.getElementById('damper_tempSetPoint').value = damper.setPoint;
+              }
+              if (damper.avgTime !== undefined) {
+                  document.getElementById('damper_avgTimeAD').value = damper.avgTime;
+              }
+          }
+      }
+  })
+  .catch(err => {
+      console.error('설정 로드 실패:', err);
+  });
+}
+
+// ===== 수정된 부분: 자동/수동 토글 처리 =====
+document.querySelectorAll('.switch input[type="checkbox"]').forEach(checkbox => {
+  const controlType = checkbox.name.replace('_mode','');
+  const statusText = document.getElementById(`${controlType}_status`);
+  const buttonsDiv = document.getElementById(`${controlType}_buttons`);
+  const hiddenMode = document.getElementById(`${controlType}_mode_value`);
+  const hiddenOnoff = document.getElementById(`${controlType}_onoffValue`);
+  const errorText = document.getElementById(`${controlType}_error`);
+
+  function applyUI(){
+    const isAuto = checkbox.checked;
+    hiddenMode.value = isAuto ? 'auto' : 'manual';
+    statusText.textContent = isAuto ? '자동' : '수동';
+    if (buttonsDiv) buttonsDiv.style.display = isAuto ? 'none' : 'flex';
+
+    if (isAuto){
+      updateButtonState(controlType, null);
+    } else {
+      if (hiddenOnoff){
+        let v = String(hiddenOnoff.value || '').toUpperCase();
+        if (v !== 'ON' && v !== 'OFF') { v = 'OFF'; hiddenOnoff.value = 'OFF'; }
+        updateButtonState(controlType, v);
+      } else {
+        updateButtonState(controlType, 'OFF');
+      }
+    }
+  }
+
+  checkbox.addEventListener('change', function(){
+    if (inFlight.has(controlType)) return;
+    applyUI();
+    
+    // ===== 핵심 수정: 자동 모드일 때 setPoint와 avgTime 전송 =====
+    const params = {
+      controlType,
+      mode: hiddenMode.value,
+      onoffValue: hiddenOnoff ? hiddenOnoff.value : undefined
+    };
+    
+    // LED 자동 모드: 현재 입력된 설정값 포함
+    if (controlType === 'led_drive' && hiddenMode.value === 'auto') {
+      const setPoint = parseFloat(document.getElementById('led_lightSetPoint').value);
+      const avgTime = parseInt(document.getElementById('led_avg_time').value);
+      
+      if (Number.isFinite(setPoint)) params.setPoint = setPoint;
+      if (Number.isFinite(avgTime)) params.avgTime = avgTime;
+      
+      console.log(`LED 자동모드 전환: setPoint=${setPoint}, avgTime=${avgTime}`);
+    }
+    
+    // 에어댐퍼 자동 모드: 현재 입력된 설정값 포함
+    if (controlType === 'air_damper' && hiddenMode.value === 'auto') {
+      const setPoint = parseFloat(document.getElementById('damper_tempSetPoint').value);
+      const avgTime = parseInt(document.getElementById('damper_avgTimeAD').value);
+      
+      if (Number.isFinite(setPoint)) params.setPoint = setPoint;
+      if (Number.isFinite(avgTime)) params.avgTime = avgTime;
+      
+      console.log(`에어댐퍼 자동모드 전환: setPoint=${setPoint}, avgTime=${avgTime}`);
+    }
+    
+    callControl(params, errorText, '모드 저장됨');
+  });
+
+  applyUI();
+});
+
+document.querySelectorAll('.control-buttons button').forEach(btn => {
+  btn.addEventListener('click', function(e) {
+    e.preventDefault();
+    const control = this.getAttribute('data-control');
+    const state = this.getAttribute('data-state');
+    if (control && state) {
+      setOnoff(control, state);
+    }
+  });
+});
+
+function setOnoff(controlType, state){
+  if (inFlight.has(controlType)) return;
+  
+  const hiddenOnoff = document.getElementById(`${controlType}_onoffValue`);
+  const hiddenMode = document.getElementById(`${controlType}_mode_value`);
+  const errorText = document.getElementById(`${controlType}_error`);
+
+  hiddenOnoff.value = state;
+  hiddenMode.value = 'manual';
+  document.getElementById(`${controlType}_status`).textContent = '수동';
+  updateButtonState(controlType, state);
+
+  const controlName = controlType === 'led_drive' ? 'LED' : 
+                     controlType === 'exhaust_fan' ? '배기팬' : 
+                     controlType === 'air_damper' ? '에어댐퍼' : controlType;
+
+  callControl({
+    controlType,
+    mode: 'manual',
+    onoffValue: state
+  }, errorText, `${controlName} ${state} 저장됨`);
+}
+
+document.getElementById('damper_params_set_btn')?.addEventListener('click', function(){
+  console.log('에어댐퍼 설정 SET 버튼 클릭');
+  const errorText = document.getElementById('damper_params_error');
+  
+  const setPoint = parseFloat(document.getElementById('damper_tempSetPoint').value);
+  const avgTime = document.getElementById('damper_avgTimeAD').value;
+
+  if (!Number.isFinite(setPoint) || setPoint < 0 || setPoint > 50) {
+    errorText.style.display='inline'; 
+    errorText.textContent='설정온도는 0~50°C 범위의 숫자여야 합니다'; 
+    return; 
+  }
+
+  if (avgTime !== '' && (isNaN(parseInt(avgTime,10)) || parseInt(avgTime,10) < 1)) {
+    errorText.style.display='inline'; 
+    errorText.textContent='단위시간은 1 이상의 정수여야 합니다'; 
+    return; 
+  }
+
+  // ===== SET 버튼은 현재 모드 유지하면서 설정만 저장 =====
+  const currentMode = document.querySelector('input[name="air_damper_mode"]').checked ? 'auto' : 'manual';
+
+  callControl({
+    controlType: 'air_damper',
+    mode: currentMode,
+    setPoint: setPoint,
+    avgTime: (avgTime === '' ? undefined : parseInt(avgTime,10))
+  }, errorText, '에어댐퍼 설정 저장됨');
+});
+
+document.getElementById('led_params_set_btn')?.addEventListener('click', function(){
+  console.log('LED 설정 SET 버튼 클릭');
+  const errorText = document.getElementById('led_params_error');
+  
+  const setPoint = parseFloat(document.getElementById('led_lightSetPoint').value);
+  const avgTime = document.getElementById('led_avg_time').value;
+
+  if (!Number.isFinite(setPoint) || setPoint<0){ 
+    errorText.style.display='inline'; 
+    errorText.textContent='기준일사량은 0 이상의 숫자'; 
+    return; 
+  }
+  if (avgTime!=='' && (isNaN(parseInt(avgTime,10)) || parseInt(avgTime,10)<1)){ 
+    errorText.style.display='inline'; 
+    errorText.textContent='단위시간은 1 이상의 정수'; 
+    return; 
+  }
+
+  // ===== SET 버튼은 현재 모드 유지하면서 설정만 저장 =====
+  const currentMode = document.querySelector('input[name="led_drive_mode"]').checked ? 'auto' : 'manual';
+
+  callControl({
+    controlType: 'led_drive', 
+    mode: currentMode,
+    setPoint: setPoint,
+    avgTime: (avgTime==='' ? undefined : parseInt(avgTime,10))
+  }, errorText, 'LED 설정 저장됨');
+});
+
+(function init(){
+  console.log('=== 초기화 시작 ===');
+  
+  ['exhaust_fan','air_damper','led_drive'].forEach(ct=>{
+    const sw = document.querySelector(`input[name="${ct}_mode"]`);
+    const hiddenMode = document.getElementById(`${ct}_mode_value`);
+    const hiddenOnoff = document.getElementById(`${ct}_onoffValue`);
+    const statusText = document.getElementById(`${ct}_status`);
+    const buttonsDiv = document.getElementById(`${ct}_buttons`);
+    
+    if (sw) sw.checked = false;
+    if (hiddenMode) hiddenMode.value = 'manual';
+    if (hiddenOnoff) hiddenOnoff.value = 'OFF';
+    if (statusText) statusText.textContent = '수동';
+    if (buttonsDiv) buttonsDiv.style.display = 'flex';
+    updateButtonState(ct, 'OFF');
+  });
+
+  document.getElementById('led_lightSetPoint').value = '300';
+  document.getElementById('led_avg_time').value = '15';
+  document.getElementById('damper_tempSetPoint').value = '25.0';
+  document.getElementById('damper_avgTimeAD').value = '10';
+
+  const chamberSelect = document.getElementById('chamberSelect');
+  if (chamberSelect) {
+    chamberSelect.addEventListener('touchend', function(e) {
+      e.stopPropagation();
+    }, {passive: true});
+  }
+
+  document.getElementById('chamberSelect')?.addEventListener('change', function(){
+      const selectedChamber = this.value;
+      console.log('챔버 변경:', selectedChamber);
+      
+      const lineProtocol = `kocUi,org_id=KIST,site_id=site_001,ui=chamber_id value="${selectedChamber}" ${Date.now() * 1000000}`;
+      
+      fetch(`${API_BASE}/save-ui-setting`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: lineProtocol
+      })
+      .then(r => {
+          if (r.ok) {
+              console.log('챔버 선택 저장 완료:', selectedChamber);
+              setTimeout(() => loadSettings(), 200);
+          }
+      })
+      .catch(err => console.error('챔버 선택 저장 실패:', err));
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() {
+      setTimeout(() => loadSettings(), 200);
+    });
+  } else {
+    setTimeout(() => loadSettings(), 200);
+  }
+  
+  console.log('=== 초기화 완료 ===');
+})();
+</script>
+</body>
+</html>
