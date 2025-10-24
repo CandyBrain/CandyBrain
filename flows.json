@@ -1,0 +1,2464 @@
+[
+    {
+        "id": "e8cc38a9cd1fb99d",
+        "type": "tab",
+        "label": "KIST_OpenChamber",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "2ced808b3820b5c5",
+        "type": "tab",
+        "label": "OpenChamber V2.6 - Fixed Timers",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "7e65b47e49f97f97",
+        "type": "tab",
+        "label": "DLI Cal",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "f037c979601d240a",
+        "type": "tab",
+        "label": "CSV 다운로드",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "fe5f57faf4c94451",
+        "type": "mqtt-broker",
+        "name": "Local MQTT",
+        "broker": "192.168.4.2",
+        "port": 1883,
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": 60,
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "4885b8b16d8b583a",
+        "type": "mqtt in",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Telemetry 1-min",
+        "topic": "kist/+/+/+/telemetry/minute",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "fe5f57faf4c94451",
+        "nl": false,
+        "rap": false,
+        "rh": 0,
+        "inputs": 0,
+        "x": 220,
+        "y": 100,
+        "wires": [
+            [
+                "e0586380835778f8",
+                "e0cfc9384c4d0102"
+            ]
+        ]
+    },
+    {
+        "id": "e0586380835778f8",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "JSON → Line Protocol (kocData)",
+        "func": "// JSON → Line Protocol (kocData & kocControl)\nconst p = (typeof msg.payload === 'string') ? JSON.parse(msg.payload) : (msg.payload || {});\nconst m = /^kist\\/([^/]+)\\/([^/]+)\\/([^/]+)\\/telemetry\\/minute$/.exec(msg.topic || \"\");\nif (!m) { node.log(\"Unexpected topic: \" + msg.topic); return null; }\nconst [_, site_id, chamber_id, collector_id] = m;\n\n// edgeKIST 토픽 무시\nif (collector_id === 'edgeKIST') {\n    node.log(\"Ignoring edgeKIST topic: \" + msg.topic);\n    return null;\n}\n\n// defaults\np.org_id = p.org_id || \"KIST\";\np.site_id = p.site_id || site_id;\np.chamber_id = p.chamber_id || chamber_id;\np.collector_id = p.collector_id || collector_id;\np.fw_version = p.fw_version || \"unknown\";\np.sensors = p.sensors || {};\np.control = p.control || {};\n\n// timestamp 처리: 항상 현재 시간으로 강제 설정\nnode.log(\"Original timestamp: \" + p.timestamp);\np.timestamp = new Date().toISOString(); // 예: 2025-09-04T20:43:00Z\nnode.log(\"Received payload: \" + JSON.stringify(msg.payload));\nnode.log(\"Processed timestamp: \" + p.timestamp);\n\n// 필드 누락 확인\nif (!p.sensors.parRaw) node.log(\"Missing parRaw in payload\");\nif (!p.sensors.tRaw) node.log(\"Missing tRaw in payload\");\nif (!p.sensors.hRaw) node.log(\"Missing hRaw in payload\");\nif (!p.sensors.co2Raw) node.log(\"Missing co2Raw in payload\");\nif (!p.sensors.tBME) node.log(\"Missing tBME in payload\");\nif (!p.sensors.hBME) node.log(\"Missing hBME in payload\");\n\nconst tsMs = Date.parse(p.timestamp);\nconst tsNs = (BigInt(tsMs) * 1000000n).toString();\n\nfunction escTag(v) {\n    return String(v).replace(/[\\s,=]/g, \"\\\\$&\");\n}\nfunction escFieldStr(v) {\n    return String(v).replace(/\"/g, '\\\\\"').replace(/[\\s,]/g, \"\\\\$&\");\n}\n\n// kocData 준비\nconst light_state = p.control.light_1 || p.control.supplemental_light || \"UNKNOWN\";\nconst tagsData = [\n    `org_id=${escTag(p.org_id)}`,\n    `site_id=${escTag(p.site_id)}`,\n    `chamber_id=${escTag(p.chamber_id)}`,\n    `collector_id=${escTag(p.collector_id)}`,\n    `fw_version=${escTag(p.fw_version)}`,\n    `light_state=${escTag(light_state)}`\n].join(\",\");\n\nfunction fFloat(k, v) {\n    const n = Number(v);\n    return Number.isFinite(n) ? `${k}=${n}` : null;\n}\nconst fieldsData = [\n    fFloat(\"pyrRaw\", p.sensors.pyrRaw),\n    fFloat(\"tRaw\", p.sensors.tRaw),\n    fFloat(\"hRaw\", p.sensors.hRaw),\n    fFloat(\"co2Raw\", p.sensors.co2Raw),\n    fFloat(\"tBME\", p.sensors.tBME),\n    fFloat(\"hBME\", p.sensors.hBME),\n    fFloat(\"light_on\", (light_state === \"ON\") ? 1 : 0)\n].filter(Boolean);\n\n// kocControl 준비\nlet tagsControl = null;\nlet fieldsControl = null;\nconst c = p.control;\nif (c && Object.keys(c).length > 0) {\n    tagsControl = [\n        `org_id=${escTag(p.org_id)}`,\n        `site_id=${escTag(p.site_id)}`,\n        `chamber_id=${escTag(p.chamber_id)}`,\n        `collector_id=${escTag(p.collector_id)}`,\n        `fw_version=${escTag(p.fw_version)}`,\n        `source=${escTag(c.source || \"edge\")}`,\n        `result=${escTag(c.result || \"OK\")}`,\n        `control_name=${escTag(c.damper_pct !== undefined ? \"damper\" : \"light\")}`\n    ].join(\",\");\n    fieldsControl = [];\n    if (c.light_1 || c.supplemental_light) {\n        const v = c.light_1 || c.supplemental_light;\n        fieldsControl.push(fFloat(\"light_on\", (String(v).toUpperCase() === \"ON\") ? 1 : 0));\n        fieldsControl.push(`light_text=\"${escFieldStr(v)}\"`);\n    }\n    if (Number.isFinite(Number(c.damper_pct))) {\n        fieldsControl.push(fFloat(\"damper_pct\", c.damper_pct));\n    }\n    if (c.reason) fieldsControl.push(`reason=\"${escFieldStr(c.reason)}\"`);\n    if (c.error_code) fieldsControl.push(`error_code=\"${escFieldStr(c.error_code)}\"`);\n    fieldsControl = fieldsControl.filter(Boolean);\n}\n\n// Line Protocol 출력\nlet lineProtocol = [];\nif (fieldsData.length > 0) {\n    lineProtocol.push(`kocData,${tagsData} ${fieldsData.join(\",\")} ${tsNs}`);\n}\nif (fieldsControl && fieldsControl.length > 0) {\n    lineProtocol.push(`kocControl,${tagsControl} ${fieldsControl.join(\",\")} ${tsNs}`);\n}\n\nif (lineProtocol.length === 0) {\n    node.log(\"No valid data to write\");\n    return null;\n}\n\n// 디버깅용 로그\nnode.log(\"Line Protocol: \" + lineProtocol.join(\"\\n\"));\nmsg.payload = lineProtocol.join(\"\\n\");\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 540,
+        "y": 100,
+        "wires": [
+            [
+                "8e8c33f0051ad6d2",
+                "ec54b7f8413ae174"
+            ]
+        ]
+    },
+    {
+        "id": "8e8c33f0051ad6d2",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "POST /api/v2/write (KIST/KISTopenChamber/ns)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 960,
+        "y": 100,
+        "wires": [
+            [
+                "36184280b71be4e9"
+            ]
+        ]
+    },
+    {
+        "id": "ec54b7f8413ae174",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "LP preview",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 850,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "e0cfc9384c4d0102",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 5",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 460,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "36184280b71be4e9",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 6",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "statusCode",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1250,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "614798014a8b26cb",
+        "type": "http in",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "GET /control",
+        "url": "/control",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 210,
+        "y": 340,
+        "wires": [
+            [
+                "29e55eedfbb17502"
+            ]
+        ]
+    },
+    {
+        "id": "29e55eedfbb17502",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "검증 & LineProtocol 생성",
+        "func": "// // \"검증 & LineProtocol 생성\" 노드 - Node-RED 호환 버전\n// const q = (msg.req && msg.req.query) || {};\n// const controlType = String(q.controlType || q.type || '').trim();\n// const sectorID = q.sectorID || '0';\n\n// // chamber_id 처리\n// let chamber = q.chamber_id || 'chamber_001';\n// if (Array.isArray(chamber)) {\n//     chamber = chamber[0];\n// }\n// chamber = String(chamber).trim();\n\n// node.log(\"=== 제어 명령 검증 시작 ===\");\n// node.log(\"controlType: \" + controlType + \", chamber: \" + chamber);\n// node.log(\"전체 쿼리: \" + JSON.stringify(q));\n\n// // 허용된 제어 타입 검증\n// const ALLOWED = ['exhaust_fan', 'air_damper', 'temperature_set', 'led_drive'];\n// if (!ALLOWED.includes(controlType)) {\n//     node.log(\"❌ 잘못된 controlType: \" + controlType);\n//     msg.statusCode = 400;\n//     msg.payload = { ok: false, error: 'invalid controlType: ' + controlType };\n//     return [null, msg];\n// }\n\n// // 제어 모드 확인\n// const requestedMode = q.mode || 'manual';\n// const isManualControl = requestedMode === 'manual';\n// const isAutoModeSwitch = requestedMode === 'auto' && !q.onoffValue;\n\n// node.log(\"요청된 모드: \" + requestedMode + \", 수동제어: \" + isManualControl + \", 자동모드전환: \" + isAutoModeSwitch);\n\n// // 공통 태그 구성\n// const tags = [\n//     'org_id=KIST',\n//     'site_id=site_001',\n//     'collector_id=edgeKIST_001',\n//     'chamber_id=' + chamber,\n//     'control_type=' + controlType,\n//     'sectorID=' + sectorID\n// ].join(',');\n\n// // 필드 구성 함수\n// const F = [];\n// function addStr(name, v) { \n//     if (v != null && v !== '') {\n//         F.push(name + '=\"' + String(v).replace(/\"/g, '\\\\\"') + '\"'); \n//     }\n// }\n// function addFloat(name, v) { \n//     const n = parseFloat(v); \n//     if (Number.isFinite(n)) F.push(name + '=' + n); \n// }\n// function addInt(name, v) { \n//     const n = parseInt(v); \n//     if (Number.isFinite(n)) F.push(name + '=' + n + 'i'); \n// }\n\n// // 제어 타입별 처리\n// if (controlType === 'exhaust_fan') {\n//     node.log(\"배기팬 제어 처리\");\n    \n//     if (q.mode) addStr('mode', q.mode);\n//     if (q.onoffValue) addStr('onoffValue', q.onoffValue);\n    \n//     // 수동 제어 식별\n//     if (isManualControl) {\n//         addStr('control_source', 'manual_ui');\n//         addInt('manual_timestamp', Date.now());\n//     }\n// }\n// else if (controlType === 'air_damper') {\n//     node.log(\"에어댐퍼 제어 처리\");\n    \n//     if (q.mode) addStr('mode', q.mode);\n//     if (q.onoffValue) addStr('onoffValue', q.onoffValue);\n    \n//     // 온도 관련 설정값 (자동 모드에서 사용)\n//     if (q.tempSetPoint !== undefined) addFloat('tempSetPoint', q.tempSetPoint);\n//     if (q.hysteresis_temp !== undefined) addFloat('hysteresis_temp', q.hysteresis_temp);\n//     if (q.min_on_sec !== undefined) addInt('min_on_sec', q.min_on_sec);\n//     if (q.min_off_sec !== undefined) addInt('min_off_sec', q.min_off_sec);\n    \n//     // 제어 소스 구분\n//     if (isManualControl) {\n//         addStr('control_source', 'manual_ui');\n//         addInt('manual_timestamp', Date.now());\n//     } else if (isAutoModeSwitch) {\n//         addStr('control_source', 'auto_config');\n//     }\n// }\n// else if (controlType === 'led_drive') {\n//     node.log(\"LED 제어 처리\");\n    \n//     if (q.mode) addStr('mode', q.mode);\n//     if (q.onoffValue) addStr('onoffValue', q.onoffValue);\n    \n//     // LED 자동 제어 설정값\n//     if (q.lightSetPoint !== undefined) addFloat('lightSetPoint', q.lightSetPoint);\n//     if (q.avg_time !== undefined) addInt('avg_time', q.avg_time);\n//     if (q.hysteresis_wm2 !== undefined) addFloat('hysteresis_wm2', q.hysteresis_wm2);\n//     if (q.min_on_sec !== undefined) addInt('min_on_sec', q.min_on_sec);\n//     if (q.min_off_sec !== undefined) addInt('min_off_sec', q.min_off_sec);\n    \n//     // 제어 소스 명확히 구분\n//     if (q.manual_control === 'true' || (isManualControl && q.onoffValue)) {\n//         addStr('control_source', 'manual_ui');\n//         addInt('manual_timestamp', Date.now());\n//         addStr('user_initiated', 'true');\n        \n//         // 수동 제어 시 자동 제어 비활성화 플래그\n//         if (q.disable_auto_control === 'true') {\n//             addStr('auto_control_disabled', 'true');\n//         }\n        \n//         node.log(\"LED 수동 제어 기록: \" + q.onoffValue + \" (타임스탬프: \" + Date.now() + \")\");\n        \n//     } else if (isAutoModeSwitch) {\n//         addStr('control_source', 'auto_config');\n//         addStr('auto_mode_enabled', 'true');\n        \n//         // 자동 모드 전환 시 수동 제어 기록 삭제 표시\n//         if (q.manual_override_cleared === 'true') {\n//             addStr('manual_override_cleared', 'true');\n//         }\n        \n//         node.log(\"LED 자동 모드 전환\");\n//     }\n// }\n// else if (controlType === 'temperature_set') {\n//     node.log(\"온도 설정 처리\");\n    \n//     if (q.tempSetPoint !== undefined) addFloat('tempSetPoint', q.tempSetPoint);\n//     if (q.mode) addStr('mode', q.mode);\n//     if (q.onoffValue) addStr('onoffValue', q.onoffValue);\n// }\n\n// // 공통 메타데이터 추가\n// addStr('request_source', 'web_ui');\n// addInt('request_timestamp', Date.now());\n\n// // 디버깅 정보\n// if (q._nonce) addStr('request_id', q._nonce);\n// if (q.control_reason) addStr('reason', q.control_reason);\n\n// // 필드 검증\n// if (!F.length) {\n//     node.log(\"❌ 필드 없음\");\n//     msg.statusCode = 400;\n//     msg.payload = { ok: false, error: 'no fields' };\n//     return [null, msg];\n// }\n\n// // Influx Line Protocol 생성\n// msg.payload = 'kocControl,' + tags + ' ' + F.join(',');\n// msg._chamber = chamber;\n// msg._controlType = controlType;\n// msg._isManualControl = isManualControl;\n// msg._isAutoModeSwitch = isAutoModeSwitch;\n\n// node.log(\"✅ 제어 명령 검증 완료\");\n// node.log(\"📤 Line Protocol: \" + msg.payload);\n\n// return [msg, null];\n\n\n// 입력 통합(GET/POST)\nconst method = (msg.req && msg.req.method) || 'GET';\nconst qraw = method === 'POST' ? (msg.req.body || {}) : ((msg.req && msg.req.query) || {});\nconst q = Object.assign({}, qraw);\n\n// 허용 타입 검증\nconst ALLOWED = ['exhaust_fan', 'air_damper', 'temperature_set', 'led_drive'];\nconst controlType = String(q.controlType || q.type || '').trim();\nif (!ALLOWED.includes(controlType)) {\n  msg.statusCode = 400;\n  msg.payload = { ok: false, error: `invalid controlType: ${controlType}` };\n  return [null, msg];\n}\n\n// chamber_id 정규화/검증\nlet chamber = Array.isArray(q.chamber_id) ? q.chamber_id[0] : (q.chamber_id || 'chamber_001');\nchamber = String(chamber).trim();\nif (!/^chamber_\\d{3}$/.test(chamber)) {\n  msg.statusCode = 400;\n  msg.payload = { ok: false, error: 'invalid chamber_id' };\n  return [null, msg];\n}\n\n// 이스케이프 유틸\nconst escTag = v => String(v).replace(/[\\s,=]/g, '\\\\$&');\nconst addStr   = (k, v, F) => { if (v != null && v !== '') F.push(`${k}=\"${String(v).replace(/\"/g,'\\\\\"')}\"`); };\nconst addFloat = (k, v, F) => { const n = Number(v); if (Number.isFinite(n)) F.push(`${k}=${n}`); };\nconst addInt   = (k, v, F) => { const n = parseInt(v, 10); if (Number.isFinite(n)) F.push(`${k}=${n}i`); };\n\n// 태그\nconst tags = [\n  'org_id=KIST',\n  'site_id=site_001',\n  'collector_id=edgeKIST_001',\n  `chamber_id=${escTag(chamber)}`,\n  `control_type=${escTag(controlType)}`,\n  `sectorID=${escTag(q.sectorID || '0')}`\n].join(',');\n\n// 필드 구성\nconst F = [];\n\n// 공통 메타\nconst desiredMode = q.mode ? String(q.mode).toLowerCase() : undefined;\nconst desiredOnOff = (q.onoffValue != null && q.onoffValue !== '') ? String(q.onoffValue).toUpperCase() : undefined;\n\n// 모드/상태 기록 (자동 모드에서는 의도치 않은 OFF 저장 방지)\nif (desiredMode) addStr('mode', desiredMode, F);\nif (desiredMode !== 'auto' && desiredOnOff) addStr('onoffValue', desiredOnOff, F);\n\n// 타입별 설정값\nif (controlType === 'air_damper') {\n  if (q.tempSetPoint !== undefined) addFloat('tempSetPoint', q.tempSetPoint, F);\n  if (q.hysteresis_temp !== undefined) addFloat('hysteresis_temp', q.hysteresis_temp, F);\n  if (q.min_on_sec !== undefined) addInt('min_on_sec', q.min_on_sec, F);\n  if (q.min_off_sec !== undefined) addInt('min_off_sec', q.min_off_sec, F);\n}\nif (controlType === 'led_drive') {\n  if (q.lightSetPoint !== undefined) addFloat('lightSetPoint', q.lightSetPoint, F);\n  if (q.avg_time !== undefined) addInt('avg_time', q.avg_time, F);\n  if (q.hysteresis_wm2 !== undefined) addFloat('hysteresis_wm2', q.hysteresis_wm2, F);\n  if (q.min_on_sec !== undefined) addInt('min_on_sec', q.min_on_sec, F);\n  if (q.min_off_sec !== undefined) addInt('min_off_sec', q.min_off_sec, F);\n}\nif (controlType === 'temperature_set') {\n  if (q.tempSetPoint !== undefined) addFloat('tempSetPoint', q.tempSetPoint, F);\n}\n\n// 수동 오버라이드 판단 및 저장\nconst isManualOverride =\n  q.manual_override === 'true' ||\n  q.force_manual === 'true' ||\n  (desiredMode === 'manual' && !!desiredOnOff);\n\nif (isManualOverride) {\n  const ovKey = `manual_override_${chamber}_${controlType}`;\n  const ov = {\n    timestamp: Date.now(),\n    state: desiredOnOff || 'UNKNOWN',\n    mode: 'manual',\n    chamber,\n    controlType\n  };\n  context.set(ovKey, ov);\n  addStr('manual_override', 'true', F);\n  addInt('override_timestamp', ov.timestamp, F);\n}\n\n// UI 즉시 변경 후 스케줄러 보호구간(레이스 방지) 마킹\nconst uiWriteKey = `last_ui_write_${chamber}_${controlType}`;\ncontext.set(uiWriteKey, Date.now());\n\n// 제어 소스/요청 메타\nif (desiredMode || desiredOnOff) {\n  const src = isManualOverride ? 'manual_ui' : (desiredMode === 'manual' ? 'manual' : 'auto');\n  addStr('control_source', src, F);\n  addInt('control_timestamp', Date.now(), F);\n  if (q._nonce) addStr('request_id', q._nonce, F);\n}\n\nif (!F.length) {\n  msg.statusCode = 400;\n  msg.payload = { ok: false, error: 'no fields' };\n  return [null, msg];\n}\n\n// Influx Line Protocol\nmsg.payload = `kocControl,${tags} ${F.join(',')}`;\nmsg._chamber = chamber;\nmsg._controlType = controlType;\n\nreturn [msg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 340,
+        "wires": [
+            [
+                "0b11070867e85c91",
+                "af449073f8bc1dcb",
+                "f8f835d564e9c2ca"
+            ],
+            [
+                "78cdc40e9fba583a"
+            ]
+        ]
+    },
+    {
+        "id": "0b11070867e85c91",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Influx Write (LP)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            },
+            {
+                "keyType": "Accept",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/json"
+            }
+        ],
+        "x": 720,
+        "y": 300,
+        "wires": [
+            [
+                "4a207065043b3f66"
+            ]
+        ]
+    },
+    {
+        "id": "af449073f8bc1dcb",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "선택: MQTT 메시지 구성",
+        "func": "// // Node-RED \"선택: MQTT 메시지 구성\" 노드 수정 코드\n// const q = (msg.req && msg.req.query) || {};\n// const controlType = String(q.controlType || q.type || '').trim();\n\n// // chamber_id 처리: 배열이면 첫 번째 값만 사용\n// let chamber = q.chamber_id || 'chamber_001';\n// if (Array.isArray(chamber)) {\n//     chamber = chamber[0];\n//     node.log(`MQTT 구성: chamber_id 배열 감지 -> ${chamber} 사용`);\n// }\n// chamber = String(chamber).trim();\n\n// // 디버깅 로그 추가\n// node.log(`=== MQTT 메시지 구성 디버깅 ===`);\n// node.log(`받은 controlType: \"${controlType}\"`);\n// node.log(`받은 chamber: \"${chamber}\"`);\n// node.log(`전체 쿼리: ${JSON.stringify(q)}`);\n\n// const usesOnOff = ['exhaust_fan', 'air_damper', 'led_drive'].includes(controlType);\n// const desiredMode = q.mode || undefined;\n// const desiredOnOff = usesOnOff ? (q.onoffValue || (desiredMode === 'auto' ? 'OFF' : undefined)) : undefined;\n\n// // LED 자동 모드일 때만 MQTT 발행 금지\n// if (controlType === 'led_drive' && desiredMode === 'auto') {\n//     node.log(`LED 자동 모드: 설정 저장만, 즉시 MQTT 발행 안함 (chamber=${chamber})`);\n//     return null;\n// }\n\n// // controlType 검증\n// if (!controlType || !['exhaust_fan', 'air_damper', 'led_drive', 'temperature_set'].includes(controlType)) {\n//     node.error(`잘못된 controlType: \"${controlType}\"`);\n//     return null;\n// }\n\n// const payload = {\n//   type: `control_${controlType}`,\n//   controlType: controlType,  // 명시적으로 전달\n//   mode: desiredMode,\n//   onoffValue: desiredOnOff,\n//   lightSetPoint: q.lightSetPoint ? Number(q.lightSetPoint) : undefined,\n//   avg_time: q.avg_time ? parseInt(q.avg_time) : undefined,\n//   tempSetPoint: q.tempSetPoint ? Number(q.tempSetPoint) : undefined,\n//   chamber_id: chamber,\n//   ts: new Date().toISOString()\n// };\n\n// // 토픽 생성 (controlType별로 다른 토픽)\n// msg.topic = `kist/control/site_001/${chamber}/edgeKIST_001/${controlType}`;\n// msg.payload = JSON.stringify(payload);\n\n// // 상세 로그\n// node.log(`=== MQTT 발행 정보 ===`);\n// node.log(`최종 controlType: \"${controlType}\"`);\n// node.log(`생성된 토픽: \"${msg.topic}\"`);\n// node.log(`페이로드 controlType: \"${payload.controlType}\"`);\n// node.log(`모드: ${desiredMode}, 상태: ${desiredOnOff}`);\n\n// return msg;\n\n\n// 오늘 주석\n// // 기존 \"선택: MQTT 메시지 구성\" 노드의 단순 수정 버전\n// // 원본 코드를 거의 그대로 유지하되, LED 자동 모드 처리만 수정\n\n// const q = (msg.req && msg.req.query) || {};\n// const controlType = String(q.controlType || q.type || '').trim();\n// const sectorID = q.sectorID || '0';\n\n// // chamber_id 처리: 배열이면 첫 번째 값만 사용\n// let chamber = q.chamber_id || 'chamber_001';\n// if (Array.isArray(chamber)) {\n//     chamber = chamber[0];\n//     node.log(`MQTT 구성: chamber_id 배열 감지 -> ${chamber} 사용`);\n// }\n// chamber = String(chamber).trim();\n\n// // 디버깅 로그\n// node.log(\"=== MQTT 메시지 구성 디버깅 ===\");\n// node.log(`받은 controlType: ${controlType}`);\n// node.log(`받은 chamber: ${chamber}`);\n// node.log(`전체 쿼리: ${JSON.stringify(q)}`);\n\n// const usesOnOff = ['exhaust_fan', 'air_damper', 'led_drive'].includes(controlType);\n// const desiredMode = q.mode || undefined;\n// const desiredOnOff = usesOnOff ? (q.onoffValue || (desiredMode === 'auto' ? 'OFF' : undefined)) : undefined;\n\n// // 제어 권한 체크\n// const isManualControl = (desiredMode === 'manual' && desiredOnOff);\n// const isAutoModeSwitch = (desiredMode === 'auto' && !desiredOnOff);\n\n// node.log(`모드: ${desiredMode}, 상태: ${desiredOnOff}`);\n// node.log(`수동제어: ${isManualControl}, 자동모드전환: ${isAutoModeSwitch}`);\n\n// // ============ 핵심 수정: LED 자동 모드 처리만 변경 ============\n// // LED 제어 특별 처리\n// if (controlType === 'led_drive') {\n//     // 수동 제어는 항상 허용\n//     if (desiredMode === 'manual') {\n//         node.log(`LED 수동 제어: 즉시 ESP32로 전송 (${desiredOnOff})`);\n//         // 계속 진행 → MQTT 발행\n//     }\n//     // 자동 모드 전환만 차단 (설정 저장용)\n//     else if (desiredMode === 'auto' && !desiredOnOff) {\n//         node.log(`LED 자동 모드 전환: 설정 저장만, 제어는 스케줄러에 위임`);\n//         return null;\n//     }\n//     // 자동 스케줄러에서 오는 실제 제어 명령은 허용\n//     else if (desiredMode === 'auto' && desiredOnOff) {\n//         node.log(`LED 자동 제어 명령: ESP32로 전송 (${desiredOnOff}) - 스케줄러 요청`);\n//         // 계속 진행 → MQTT 발행\n//     }\n// }\n\n// // 에어댐퍼 제어 처리 (기존과 동일)\n// if (controlType === 'air_damper') {\n//     if (desiredMode === 'auto' && !desiredOnOff) {\n//         node.log(`에어댐퍼 자동 모드 전환: 온도 스케줄러에 위임`);\n//         return null;\n//     }\n//     if (isManualControl) {\n//         node.log(`에어댐퍼 수동 제어: 즉시 ESP32로 전송 (${desiredOnOff})`);\n//     }\n// }\n\n// // 배기팬은 항상 즉시 제어 (기존과 동일)\n// if (controlType === 'exhaust_fan') {\n//     node.log(`배기팬 제어: 즉시 ESP32로 전송 (모드: ${desiredMode}, 상태: ${desiredOnOff})`);\n// }\n\n// // controlType 검증\n// if (!controlType || !['exhaust_fan', 'air_damper', 'led_drive', 'temperature_set'].includes(controlType)) {\n//     node.error(`잘못된 controlType: ${controlType}`);\n//     return null;\n// }\n\n// // MQTT 페이로드 구성 (기존과 동일하게 단순화)\n// const payload = {\n//     type: `control_${controlType}`,\n//     controlType: controlType,\n//     mode: desiredMode,\n//     onoffValue: desiredOnOff,\n//     chamber_id: chamber,\n//     ts: new Date().toISOString(),\n    \n//     // 최소한의 제어 소스 구분만\n//     control_source: (desiredMode === 'auto' && desiredOnOff) ? 'auto_scheduler' : 'manual_ui',\n    \n//     // 추가 설정값들\n//     lightSetPoint: q.lightSetPoint ? Number(q.lightSetPoint) : undefined,\n//     avg_time: q.avg_time ? parseInt(q.avg_time) : undefined,\n//     hysteresis_wm2: q.hysteresis_wm2 ? Number(q.hysteresis_wm2) : undefined,\n//     min_on_sec: q.min_on_sec ? parseInt(q.min_on_sec) : undefined,\n//     min_off_sec: q.min_off_sec ? parseInt(q.min_off_sec) : undefined,\n//     tempSetPoint: q.tempSetPoint ? Number(q.tempSetPoint) : undefined,\n//     hysteresis_temp: q.hysteresis_temp ? Number(q.hysteresis_temp) : undefined\n// };\n\n// // undefined 값 제거\n// Object.keys(payload).forEach(key => {\n//     if (payload[key] === undefined) {\n//         delete payload[key];\n//     }\n// });\n\n// // 토픽 생성\n// msg.topic = `kist/control/site_001/${chamber}/edgeKIST_001/${controlType}`;\n// msg.payload = JSON.stringify(payload);\n\n// // 추가 메타데이터\n// msg.headers = {\n//     'Content-Type': 'application/json',\n//     'User-Agent': 'NodeRED-MQTT-Publisher'\n// };\n\n// // 상세 로그\n// node.log(\"=== MQTT 발행 정보 ===\");\n// node.log(`최종 controlType: ${controlType}`);\n// node.log(`생성된 토픽: ${msg.topic}`);\n// node.log(`모드: ${desiredMode}, 상태: ${desiredOnOff}`);\n\n// // 제어 명령 로그\n// if (desiredOnOff) {\n//     if (payload.control_source === 'auto_scheduler') {\n//         node.log(`🟡 자동 제어 명령: ${controlType} = ${desiredOnOff} (스케줄러)`);\n//     } else {\n//         node.log(`🔵 수동 제어 명령: ${controlType} = ${desiredOnOff} (사용자)`);\n//     }\n// } else {\n//     node.log(`🟢 모드 설정: ${controlType} = ${desiredMode} 모드`);\n// }\n\n// return msg;\n\n\n\n// 입력 통합(GET/POST)\nconst method = (msg.req && msg.req.method) || 'GET';\nconst qraw = method === 'POST' ? (msg.req.body || {}) : ((msg.req && msg.req.query) || {});\nconst q = Object.assign({}, qraw);\n\n// controlType/chamber 정규화\nconst controlType = String(q.controlType || q.type || '').trim();\nconst ALLOWED = ['exhaust_fan', 'air_damper', 'led_drive', 'temperature_set'];\nif (!ALLOWED.includes(controlType)) { node.error(`잘못된 controlType: \"${controlType}\"`); return null; }\n\nlet chamber = Array.isArray(q.chamber_id) ? q.chamber_id[0] : (q.chamber_id || 'chamber_001');\nchamber = String(chamber).trim();\n\n// 모드/상태\nconst desiredMode = q.mode ? String(q.mode).toLowerCase() : undefined;\nconst desiredOnOff = (q.onoffValue != null && q.onoffValue !== '') ? String(q.onoffValue).toUpperCase() : undefined;\n\n// 자동 모드일 때는 즉시 MQTT 발행 금지 (LED/댐퍼/팬 공통)\nif (desiredMode === 'auto') {\n  node.log(`${controlType} 자동 모드: 설정 저장만, 즉시 MQTT 발행 안함 (chamber=${chamber})`);\n  return null;\n}\n\n// 수동 모드에서만, onoffValue 존재 시 발행\nif (desiredMode !== 'manual' || !desiredOnOff) {\n  node.log(`즉시 발행 조건 불충족: mode=${desiredMode}, onoff=${desiredOnOff} (chamber=${chamber}, ${controlType})`);\n  return null;\n}\n\nconst payload = {\n  type: `control_${controlType}`,\n  controlType,\n  mode: desiredMode,\n  onoffValue: desiredOnOff,\n  lightSetPoint: q.lightSetPoint ? Number(q.lightSetPoint) : undefined,\n  avg_time: q.avg_time ? parseInt(q.avg_time, 10) : undefined,\n  tempSetPoint: q.tempSetPoint ? Number(q.tempSetPoint) : undefined,\n  chamber_id: chamber,\n  ts: new Date().toISOString(),\n  user_action: true\n};\n\nmsg.topic = `kist/control/site_001/${chamber}/edgeKIST_001/${controlType}`;\nmsg.payload = JSON.stringify(payload);\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 690,
+        "y": 260,
+        "wires": [
+            [
+                "ee4e662c5d8671d5",
+                "76a425f8e15a6fa0"
+            ]
+        ]
+    },
+    {
+        "id": "ee4e662c5d8671d5",
+        "type": "mqtt out",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "발행 (선택)",
+        "topic": "",
+        "qos": "1",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "fe5f57faf4c94451",
+        "x": 930,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "4a207065043b3f66",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "HTTP 200 + CORS",
+        "func": "// msg.statusCode = 200;\n// msg.headers = { 'Content-Type':'application/json; charset=utf-8', 'Access-Control-Allow-Origin':'*' };\n// msg.payload = { ok:true };\n// return msg;\n\nconst ok = (typeof msg.statusCode === 'number') ? (msg.statusCode >= 200 && msg.statusCode < 300) : true;\nmsg.headers = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store, max-age=0' };\nif (ok) { msg.statusCode = 200; msg.payload = { ok: true }; }\nelse { msg.statusCode = msg.statusCode || 502; msg.payload = { ok: false, error: (typeof msg.payload === 'string' ? msg.payload : 'write failed') }; }\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 950,
+        "y": 300,
+        "wires": [
+            [
+                "78cdc40e9fba583a"
+            ]
+        ]
+    },
+    {
+        "id": "78cdc40e9fba583a",
+        "type": "http response",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "HTTP 응답",
+        "statusCode": "",
+        "headers": {},
+        "x": 1270,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "d8b9add44aec53d8",
+        "type": "http in",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "GET /settings/latest",
+        "url": "/settings/latest",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 230,
+        "y": 460,
+        "wires": [
+            [
+                "55c255bdfe39f899",
+                "5081ec45d8b228dc"
+            ]
+        ]
+    },
+    {
+        "id": "55c255bdfe39f899",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Flux 생성 (챔버별 마지막 설정)",
+        "func": "// // 원래 LED만 조회하는 코드로 복구\n// const chamber = (msg.req && msg.req.query && msg.req.query.chamber_id) || 'chamber_001';\n\n// msg.payload = `\n// from(bucket: \"KISTopenChamber\")\n//   |> range(start: -7d)\n//   |> filter(fn: (r) => \n//     r._measurement == \"kocControl\" and\n//     r.org_id == \"KIST\" and\n//     r.site_id == \"site_001\" and\n//     r.collector_id == \"edgeKIST_001\" and\n//     r.chamber_id == \"${chamber}\" and\n//     r.control_type == \"led_drive\")\n//   |> last()\n//   |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n//   |> map(fn: (r) => ({\n//     control_type: \"led_drive\",\n//     mode: r.mode,\n//     onoffValue: r.onoffValue,\n//     lightSetPoint: r.lightSetPoint,\n//     avg_time: r.avg_time,\n//     hysteresis_wm2: r.hysteresis_wm2,\n//     min_on_sec: r.min_on_sec,\n//     min_off_sec: r.min_off_sec,\n//     mode_time: string(v: r._time)\n//   }))\n// `;\n\n// return msg;\n\n\n// Function 노드: \"Flux 생성 (챔버별 마지막 설정)\" 전체 교체\nconst chamber = (msg.req && msg.req.query && msg.req.query.chamber_id) || 'chamber_001';\n\nmsg.payload = `\ndata = from(bucket: \"KISTopenChamber\")\n  |> range(start: -30d)\n  |> filter(fn: (r) =>\n    r._measurement == \"kocControl\" and\n    r.org_id == \"KIST\" and\n    r.site_id == \"site_001\" and\n    r.collector_id == \"edgeKIST_001\" and\n    r.chamber_id == \"${chamber}\" and\n    (r.control_type == \"led_drive\" or r.control_type == \"air_damper\"))\n  |> keep(columns: [\"_time\",\"_field\",\"_value\",\"control_type\"])\n\ndata\n  |> group(columns: [\"control_type\",\"_field\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> first()\n  |> group(columns: [\"control_type\"])\n  |> pivot(rowKey: [\"control_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n`;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 460,
+        "wires": [
+            [
+                "0e9a8def99d66b67",
+                "7d911a1625378316"
+            ]
+        ]
+    },
+    {
+        "id": "0e9a8def99d66b67",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Influx Query (CSV)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 730,
+        "y": 460,
+        "wires": [
+            [
+                "fbf9881a38147862",
+                "803f4bab1d2dc534"
+            ]
+        ]
+    },
+    {
+        "id": "fbf9881a38147862",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "CSV → JSON (control_type별)",
+        "func": "// 완성된 \"CSV → JSON (control_type별)\" 노드 코드\n// 각 필드별로 가장 최신의 유효한 값을 선택하여 조합\n\n\n// 디버깅: 받은 CSV 내용 확인\nconst csv = (msg.payload || '').trim();\nnode.log(\"=== CSV 디버깅 ===\");\nnode.log(\"CSV 길이: \" + csv.length);\nnode.log(\"CSV 내용 (첫 500자): \" + csv.substring(0, 500));\n\n\nconst settings = {};\n\nif (csv) {\n  const lines = csv.split(/\\r?\\n/).filter(Boolean);\n\n  if (lines.length < 2) {\n    // 데이터가 없는 경우 빈 settings 반환\n    msg.statusCode = 200;\n    msg.headers = {\n      'Content-Type': 'application/json; charset=utf-8',\n      'Access-Control-Allow-Origin': '*',\n      'Cache-Control': 'no-store, max-age=0'\n    };\n    msg.payload = { ok: true, settings };\n    return msg;\n  }\n\n  const header = lines[0].split(',').map(s => s.trim());\n\n  // 각 control_type별로 필드별 최신값 추적\n  const fieldLatestValues = {};\n\n  for (let i = 1; i < lines.length; i++) {\n    const cols = lines[i].split(',');\n    const row = {};\n\n    // 헤더와 데이터 매핑\n    header.forEach((h, idx) => {\n      row[h] = cols[idx] === undefined ? null : cols[idx];\n    });\n\n    const controlType = row['control_type'] || 'led_drive';\n    const timestamp = row['mode_time'] || row['_time'] || new Date().toISOString();\n\n    // control_type별 초기화\n    if (!fieldLatestValues[controlType]) {\n      fieldLatestValues[controlType] = {};\n    }\n\n    // 각 필드별로 유효한 값이 있으면 최신값으로 업데이트\n    Object.keys(row).forEach(field => {\n      const value = row[field];\n\n      // 유효한 값인지 확인 (빈 문자열, null, undefined 제외)\n      // CSV 메타데이터 필드는 제외\n      if (field !== '' &&\n        field !== 'result' &&\n        field !== 'table' &&\n        field !== '_result' &&\n        value != null &&\n        value !== '') {\n\n        // 현재 필드의 저장된 값이 없거나, 더 최신 타임스탬프면 업데이트\n        if (!fieldLatestValues[controlType][field] ||\n          timestamp >= fieldLatestValues[controlType][field].timestamp) {\n          fieldLatestValues[controlType][field] = {\n            value: value,\n            timestamp: timestamp\n          };\n        }\n      }\n    });\n  }\n\n  // 최종 결과 생성\n  Object.keys(fieldLatestValues).forEach(controlType => {\n    const result = {};\n\n    Object.keys(fieldLatestValues[controlType]).forEach(field => {\n      let value = fieldLatestValues[controlType][field].value;\n\n      // 숫자 필드 타입 변환\n      if (['tempSetPoint', 'lightSetPoint', 'avg_time', 'hysteresis_wm2', 'min_on_sec', 'min_off_sec'].includes(field)) {\n        const numValue = Number(value);\n        if (Number.isFinite(numValue)) {\n          value = numValue;\n        }\n      }\n\n      // 문자열 필드 정리 (빈 문자열 제거)\n      if (['mode', 'onoffValue', 'current_state'].includes(field)) {\n        if (value === '' || value == null) {\n          return; // 이 필드는 결과에 포함하지 않음\n        }\n      }\n\n      // mode_time은 ISO 문자열 그대로 보존\n      if (field === 'mode_time') {\n        value = String(value);\n      }\n\n      result[field] = value;\n    });\n\n    // *** LED 상태 필드 처리 - 수정된 부분 ***\n    let finalLedStatus = null;\n    \n    // 1. 상태 필드 우선순위: current_state > onoffValue > light_text\n    if (result.current_state && result.current_state !== '') {\n      finalLedStatus = String(result.current_state).toUpperCase();\n      // onoffValue가 없으면 current_state 값으로 설정\n      if (!result.onoffValue || result.onoffValue === '') {\n        result.onoffValue = result.current_state;\n      }\n    } else if (result.onoffValue && result.onoffValue !== '') {\n      finalLedStatus = String(result.onoffValue).toUpperCase();\n    } else if (result.light_text && result.light_text !== '') {\n      const lightText = String(result.light_text).toUpperCase();\n      if (lightText.includes('ON')) {\n        finalLedStatus = 'ON';\n        result.onoffValue = 'ON';\n      } else if (lightText.includes('OFF')) {\n        finalLedStatus = 'OFF';\n        result.onoffValue = 'OFF';\n      }\n    }\n    \n    // 2. current_state는 삭제하지 않고 보존 (디버깅 및 호환성 위해)\n    // 기존: delete result.current_state; ← 이 줄을 제거함\n    \n    // 3. 최종 상태값 로깅 및 검증\n    if (finalLedStatus && (finalLedStatus === 'ON' || finalLedStatus === 'OFF')) {\n      node.log(`챔버 ${controlType}: 최종 LED 상태 = ${finalLedStatus} (current_state: ${result.current_state}, onoffValue: ${result.onoffValue})`);\n    } else if (controlType === 'led_drive') {\n      node.log(`챔버 ${controlType}: LED 상태 불명확 - current_state: ${result.current_state}, onoffValue: ${result.onoffValue}, light_text: ${result.light_text}`);\n    }\n\n    // 최소한의 필수 필드가 있는지 확인\n    if (Object.keys(result).length > 1) { // control_type 외에 다른 필드가 있어야 함\n      settings[controlType] = result;\n    }\n  });\n}\n\n// HTTP 응답 생성\nmsg.statusCode = 200;\nmsg.headers = {\n  'Content-Type': 'application/json; charset=utf-8',\n  'Access-Control-Allow-Origin': '*',\n  'Cache-Control': 'no-store, max-age=0'\n};\nmsg.payload = { ok: true, settings };\n\n// 디버깅용 로그 (필요시 제거)\nif (settings.led_drive) {\n  node.log(`LED 설정 파싱 완료: ${JSON.stringify(settings.led_drive)}`);\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 990,
+        "y": 460,
+        "wires": [
+            [
+                "78cdc40e9fba583a",
+                "995178d3ceb4e340"
+            ]
+        ]
+    },
+    {
+        "id": "ad50927bb0251c45",
+        "type": "http in",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "GET /ui-selection",
+        "url": "/ui-selection",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 220,
+        "y": 600,
+        "wires": [
+            [
+                "2484c47957020565"
+            ]
+        ]
+    },
+    {
+        "id": "2484c47957020565",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "UI 선택값 → LP",
+        "func": "const q = (msg.req && msg.req.query) || {};\nconst ui = q.ui || 'chamber_id';\nconst value = q.value || 'chamber_001';\nconst tags = [ 'org_id=KIST','site_id=site_001',`ui=${ui}` ].join(',');\nconst fields = `value=\\\"${String(value).replace(/\"/g,'\\\\\"')}\\\"`;\nmsg.payload = `kocUi,${tags} ${fields}`;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "x": 440,
+        "y": 600,
+        "wires": [
+            [
+                "0818df55bd821146"
+            ]
+        ]
+    },
+    {
+        "id": "0818df55bd821146",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Influx Write (kocUi)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            },
+            {
+                "keyType": "Accept",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/json"
+            }
+        ],
+        "x": 730,
+        "y": 600,
+        "wires": [
+            [
+                "71ca32de0e0b44da",
+                "5eb35b6882775774"
+            ]
+        ]
+    },
+    {
+        "id": "71ca32de0e0b44da",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "HTTP 200 + CORS",
+        "func": "msg.statusCode = 200;\nmsg.headers = {\n  'Content-Type':'application/json; charset=utf-8',\n  'Access-Control-Allow-Origin':'*',\n  'Cache-Control':'no-store, max-age=0'\n};\nmsg.payload = { ok:true };\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 950,
+        "y": 600,
+        "wires": [
+            [
+                "78cdc40e9fba583a",
+                "8cc8e6776bb0a636"
+            ]
+        ]
+    },
+    {
+        "id": "76131fcff9202188",
+        "type": "comment",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "챔버선택",
+        "info": "",
+        "x": 200,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "5eb35b6882775774",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 1",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "76a425f8e15a6fa0",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 2",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "7d911a1625378316",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 3",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "803f4bab1d2dc534",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 4",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "5081ec45d8b228dc",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 7",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 420,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "8cf2a64b6d716ada",
+        "type": "inject",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "매 1분",
+        "props": [],
+        "repeat": "60",
+        "crontab": "",
+        "once": false,
+        "onceDelay": "2",
+        "topic": "",
+        "x": 220,
+        "y": 840,
+        "wires": [
+            [
+                "3a89902a6985b302"
+            ]
+        ]
+    },
+    {
+        "id": "3a89902a6985b302",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "챔버 목록 fan-out",
+        "func": "// // 필요 시 실제 보유 챔버 목록으로 교체\n// const chambers = [\n//   'chamber_001','chamber_002','chamber_003','chamber_004','chamber_005',\n//   'chamber_006','chamber_007','chamber_008','chamber_009','chamber_010'\n// ];\n// return [ chambers.map(ch => ({ chamber_id: ch, payload: {} })) ];\n\n\n// 실제 존재하는 챔버만 동적으로 확인하여 목록 생성\n// 향후 챔버 추가/제거 시 자동으로 반영됨\n\n// 방법 1: 고정 목록 (현재 존재하는 챔버만)\nconst existingChambers = ['chamber_001']; // 실제 존재하는 챔버만 명시\n\n// 방법 2: InfluxDB에서 실제 데이터가 있는 챔버 목록을 동적으로 가져오기 (추천)\n// 이 경우 HTTP Request 노드로 InfluxDB 쿼리 필요\n\n// 현재는 방법 1 사용\nreturn [existingChambers.map(ch => ({ chamber_id: ch, payload: {} }))];",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 840,
+        "wires": [
+            [
+                "aa879e41d0778374"
+            ]
+        ]
+    },
+    {
+        "id": "aa879e41d0778374",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "GET /settings/latest",
+        "method": "GET",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "http://127.0.0.1:1880/settings/latest?chamber_id={{{chamber_id}}}",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": true,
+        "headers": [],
+        "x": 610,
+        "y": 840,
+        "wires": [
+            [
+                "673f3a0797c8b4d0"
+            ]
+        ]
+    },
+    {
+        "id": "673f3a0797c8b4d0",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "설정 꺼내기+기본값",
+        "func": "// 수정된 \"설정 꺼내기+기본값\" 노드\n// 사용자가 설정한 avg_time을 정확히 반영\n\nconst chamber = msg.chamber_id || 'chamber_001';\n\n// HTTP 응답에서 설정값 추출\nconst S = (msg.payload && msg.payload.settings && msg.payload.settings.led_drive) || {};\n\nnode.log(`챔버 ${chamber}: 받은 설정 = ${JSON.stringify(S)}`);\n\nconst cfg = {\n  mode: S.mode || 'manual',\n  threshold: Number(S.lightSetPoint ?? 300),\n  avgMin: Number(S.avg_time ?? 15),\n  hysteresis: Number(S.hysteresis_wm2 ?? 30),\n  minOn: Number(S.min_on_sec ?? 600),\n  minOff: Number(S.min_off_sec ?? 300)\n};\n\nnode.log(`챔버 ${chamber}: 설정 cfg = ${JSON.stringify(cfg)}`);\n\nmsg.ledCfg = cfg;\nmsg.chamber_id = chamber;\n\n// 사용자 설정 avg_time을 그대로 사용 (최소/최대 제한 완화)\n// 최소 1분, 최대 1440분(24시간)으로 합리적 범위 설정\nconst userAvgTime = Math.min(1440, Math.max(1, Math.floor(cfg.avgMin)));\n\nnode.log(`챔버 ${chamber}: 사용자 avg_time = ${cfg.avgMin}분, 적용값 = ${userAvgTime}분`);\n\nmsg.headers = {\n  'Content-Type': 'application/vnd.flux',\n  'Accept': 'application/csv'\n};\n\n// Flux 쿼리에서 사용자 설정 시간 적용\nmsg.payload = `from(bucket: \"KISTopenChamber\")\n  |> range(start: -${userAvgTime}m)\n  |> filter(fn: (r) => \n    r._measurement == \"kocData\" and\n    r.org_id == \"KIST\" and\n    r.site_id == \"site_001\" and\n    r.collector_id == \"edgeKIST_001\" and\n    r.chamber_id == \"${chamber}\" and\n    r._field == \"pyrRaw\"\n  )\n  |> mean()\n  |> keep(columns: [\"_value\"])`;\n\n// LED 현재 상태 조회를 위한 추가 정보\nmsg.needLedState = true;\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 830,
+        "y": 840,
+        "wires": [
+            [
+                "b6216ada7262ba43"
+            ]
+        ]
+    },
+    {
+        "id": "b6216ada7262ba43",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Influx Query(mean pyrRaw)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 1080,
+        "y": 840,
+        "wires": [
+            [
+                "632e69b6f7bdb6f9",
+                "6e6ed4a6768adcb4"
+            ]
+        ]
+    },
+    {
+        "id": "4d35ed9bcd602442",
+        "type": "mqtt out",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "제어 발행",
+        "topic": "",
+        "qos": "1",
+        "retain": "false",
+        "broker": "fe5f57faf4c94451",
+        "x": 1600,
+        "y": 780,
+        "wires": []
+    },
+    {
+        "id": "58e1418482a73281",
+        "type": "http request",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "Influx Write (제어로그)",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": true,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 1640,
+        "y": 840,
+        "wires": [
+            [
+                "2e2269c888b6ee71"
+            ]
+        ]
+    },
+    {
+        "id": "2e2269c888b6ee71",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "에러/응답 확인",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1840,
+        "y": 840,
+        "wires": []
+    },
+    {
+        "id": "8cc8e6776bb0a636",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 8",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1140,
+        "y": 600,
+        "wires": []
+    },
+    {
+        "id": "632e69b6f7bdb6f9",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 10",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1300,
+        "y": 700,
+        "wires": []
+    },
+    {
+        "id": "0c9ba8e611513469",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 9",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1600,
+        "y": 740,
+        "wires": []
+    },
+    {
+        "id": "e162ec732c40e7a1",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 11",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1600,
+        "y": 880,
+        "wires": []
+    },
+    {
+        "id": "f8f835d564e9c2ca",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 12",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 640,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "995178d3ceb4e340",
+        "type": "debug",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "debug 13",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1260,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "576798779c4637a9",
+        "type": "comment",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "수정",
+        "info": "",
+        "x": 1290,
+        "y": 880,
+        "wires": []
+    },
+    {
+        "id": "6e6ed4a6768adcb4",
+        "type": "function",
+        "z": "e8cc38a9cd1fb99d",
+        "d": true,
+        "name": "CSV→avgPyr, 판단2_New",
+        "func": "// // LED 자동 제어 (정시/주기 실행, avg_time 분마다 1회 평가)\n// // - 직전 avg_time분 평균 일사량(mean)만 조회\n// // - mean < threshold이면 ON, mean >= threshold이면 OFF\n// // - 히스테리시스/최소 ON/OFF 시간은 사용하지 않음(요청 방식)\n\n// const OVERRIDE_TTL_MS = 30 * 60 * 1000;\n// const UI_GRACE_MS = 5000;\n\n// const chamber = msg.chamber_id || 'unknown';\n// const csvText = (msg.payload || '').trim();\n// const now = Date.now();\n\n// node.log(`=== [${chamber}] LED 정시 제어 시작 ===`);\n\n// // 0) UI 직후 보호구간\n// const uiWriteKey = `last_ui_write_${chamber}_led_drive`;\n// const lastUiWrite = context.get(uiWriteKey);\n// if (lastUiWrite && (now - lastUiWrite) < UI_GRACE_MS) {\n//   node.log(`[${chamber}] UI 직후 보호구간 - 자동 제어 스킵`);\n//   return [null, null];\n// }\n\n// // 1) 수동 오버라이드(30분) 우선\n// const ovKey = `manual_override_${chamber}_led_drive`;\n// const ov = context.get(ovKey);\n// if (ov && (now - ov.timestamp) < OVERRIDE_TTL_MS) {\n//   node.log(`[${chamber}] 수동 오버라이드 활성 - 자동 제어 중단`);\n//   return [null, null];\n// }\n\n// // 2) 설정\n// const cfg = msg.ledCfg || {};\n// const mode = String(cfg.mode || 'manual').toLowerCase();\n// const threshold = Number(cfg.threshold) || 300;\n// const avgMinutes = Math.max(1, Number(cfg.avgMin) || 15); // 1분 이상\n\n// if (mode !== 'auto') {\n//   node.log(`[${chamber}] 비자동 모드(${mode}) - 자동 제어 중단`);\n//   return [null, null];\n// }\n\n// // 3) 정시 스케줄: 마지막 실행 시점 기준 정확히 avgMinutes 분마다 1회\n// const schedKey = `strict_led_schedule_${chamber}`;\n// let sched = context.get(schedKey) || { lastRun: 0, nextRun: now + (avgMinutes * 60 * 1000), intervalMs: avgMinutes * 60 * 1000 };\n\n// // avg_time 변경 반영\n// const desiredInterval = avgMinutes * 60 * 1000;\n// if (sched.intervalMs !== desiredInterval) {\n//   node.log(`[${chamber}] 주기 변경: ${Math.round(sched.intervalMs/60000)}분 → ${avgMinutes}분`);\n//   sched.intervalMs = desiredInterval;\n//   // 다음 실행은 새 주기로 예약\n//   sched.nextRun = now + desiredInterval;\n// }\n\n// // 아직 시간이 안 됐으면 스킵\n// if (now < sched.nextRun) {\n//   const sec = Math.round((sched.nextRun - now) / 1000);\n//   node.log(`[${chamber}] 대기중 - ${sec}초 후 평가(주기=${avgMinutes}분)`);\n//   context.set(schedKey, sched);\n//   return [null, null];\n// }\n\n// // 실행 시각 도달 → 다음 실행 예약\n// sched.lastRun = now;\n// sched.nextRun = now + sched.intervalMs;\n// context.set(schedKey, sched);\n\n// node.log(`[${chamber}] 평가 실행(주기=${avgMinutes}분), 다음: ${new Date(sched.nextRun).toLocaleString()}`);\n\n// // 4) Influx 쿼리 결과(CSV)에서 mean(_value) 읽기\n// let avgPyr = NaN;\n// try {\n//   if (csvText && csvText.length > 0) {\n//     const lines = csvText.split(/\\r?\\n/).filter(Boolean);\n//     if (lines.length >= 2) {\n//       const header = lines[0].split(',');\n//       const data = lines[1].split(',');\n//       const idx = header.indexOf('_value');\n//       if (idx >= 0 && data[idx] !== undefined) {\n//         avgPyr = parseFloat(data[idx]);\n//       }\n//     }\n//   }\n// } catch (e) {\n//   node.error(`[${chamber}] CSV 파싱 오류: ${e.message}`);\n// }\n\n// if (!Number.isFinite(avgPyr)) {\n//   node.log(`[${chamber}] 평균 일사량 없음/무효 - 제어 스킵`);\n//   return [null, null];\n// }\n\n// // 5) 단순 비교로 제어 결정\n// // 요청: mean < threshold → ON, mean >= threshold → OFF\n// const desired = (avgPyr < threshold) ? 'ON' : 'OFF';\n// const stateKey = `led_state_${chamber}`;\n// let ledState = context.get(stateKey) || { current: 'OFF', lastChangeTime: now, lastSyncTime: now };\n\n// let controlAction = null;\n// let reason = `평균=${avgPyr.toFixed(2)} vs 기준=${threshold} → ${desired}`;\n\n// if (ledState.current !== desired) {\n//   controlAction = desired;\n//   ledState.current = desired;\n//   ledState.lastChangeTime = now;\n// }\n// ledState.lastSyncTime = now;\n// context.set(stateKey, ledState);\n\n// // 6) MQTT(ESP32) - 상태가 바뀔 때만 발행\n// let mqttMessage = null;\n// if (controlAction) {\n//   const mqttPayload = {\n//     type: 'control_led_drive',\n//     controlType: 'led_drive',\n//     mode: 'auto',\n//     onoffValue: controlAction,\n//     chamber_id: chamber,\n//     ts: new Date().toISOString(),\n//     auto_control: true,\n//     avg_time_minutes: avgMinutes,\n//     avg_pyr: Number(avgPyr.toFixed(3)),\n//     threshold\n//   };\n//   mqttMessage = {\n//     topic: `kist/control/site_001/${chamber}/edgeKIST_001/led_drive`,\n//     payload: JSON.stringify(mqttPayload)\n//   };\n// }\n\n// // 7) Influx 제어 로그(항상 기록: 상태변경 유무와 이유 포함)\n// const fields = [\n//   `reason=\"${reason.replace(/\"/g,'\\\\\"')}\"`,\n//   `mode=\"auto\"`,\n//   `current_state=\"${ledState.current}\"`,\n//   `onoffValue=\"${ledState.current}\"`,\n//   `avg_pyr=${avgPyr.toFixed(3)}`,\n//   `threshold=${threshold}`,\n//   `avg_time=${avgMinutes}i`,\n//   `control_source=\"strict_scheduler\"`,\n//   `action_taken=${controlAction ? '1i' : '0i'}`\n// ];\n\n// const influxMessage = {\n//   payload: `kocControl,org_id=KIST,site_id=site_001,collector_id=edgeKIST_001,chamber_id=${chamber},control_type=led_drive,source=node-red,result=OK ${fields.join(',')} ${now}000000`\n// };\n\n// if (controlAction) {\n//   node.log(`[${chamber}] LED ${controlAction} 실행 - ${reason}`);\n// } else {\n//   node.log(`[${chamber}] LED 상태유지(${ledState.current}) - ${reason}`);\n// }\n\n// return [mqttMessage, influxMessage];\n\n\n// LED 자동 제어 (avg_time 분마다 1회 평가, 워치독 포함)\n// - 직전 avg_time분 평균 일사량(mean)만 조회 (Influx mean 결과를 CSV로 전달받음)\n// - mean < threshold → ON, mean >= threshold → OFF\n// - 워치독: nextRun 비정상/고착 시 자동 복구\n\nconst OVERRIDE_TTL_MS = 30 * 60 * 1000;\nconst UI_GRACE_MS = 5000;\n\nconst chamber = msg.chamber_id || 'unknown';\nconst csvText = (msg.payload || '').trim();\nconst now = Date.now();\n\nnode.log(`=== [${chamber}] LED 정시 제어 시작 ===`);\n\n// 0) UI 직후 보호구간\nconst uiWriteKey = `last_ui_write_${chamber}_led_drive`;\nconst lastUiWrite = context.get(uiWriteKey);\nif (lastUiWrite && (now - lastUiWrite) < UI_GRACE_MS) {\n  node.log(`[${chamber}] UI 직후 보호구간 - 자동 제어 스킵`);\n  return [null, null];\n}\n\n// 1) 수동 오버라이드(30분) 우선\nconst ovKey = `manual_override_${chamber}_led_drive`;\nconst ov = context.get(ovKey);\nif (ov && (now - ov.timestamp) < OVERRIDE_TTL_MS) {\n  node.log(`[${chamber}] 수동 오버라이드 활성 - 자동 제어 중단`);\n  return [null, null];\n}\n\n// 2) 설정\nconst cfg = msg.ledCfg || {};\nconst mode = String(cfg.mode || 'manual').toLowerCase();\nconst threshold = Number(cfg.threshold) || 300;\nconst avgMinutes = Math.max(1, Number(cfg.avgMin) || 15); // 1분 이상\n\nif (mode !== 'auto') {\n  node.log(`[${chamber}] 비자동 모드(${mode}) - 자동 제어 중단`);\n  return [null, null];\n}\n\n// 3) 정시 스케줄: avg_time 분마다 1회\nconst intervalMs = avgMinutes * 60 * 1000;\nconst schedKey = `strict_led_schedule_${chamber}`;\nlet sched = context.get(schedKey);\n\n// 최초 생성\nif (!sched) {\n  sched = { lastRun: 0, nextRun: now + intervalMs, intervalMs };\n  context.set(schedKey, sched);\n  node.log(`[${chamber}] 스케줄 초기화 → ${Math.round(intervalMs / 60000)}분 후 첫 평가`);\n} else {\n  // avg_time 변경 반영\n  if (sched.intervalMs !== intervalMs) {\n    node.log(`[${chamber}] 주기 변경: ${Math.round((sched.intervalMs || intervalMs) / 60000)}분 → ${avgMinutes}분`);\n    sched.intervalMs = intervalMs;\n    // 다음 실행 재계산(변경 즉시 다음 간격 후 평가)\n    sched.nextRun = now + intervalMs;\n  }\n\n  // 3-a) 워치독: nextRun 비정상/고착 자동 복구\n  const tooPast = sched.nextRun < (now - 24 * 60 * 60 * 1000);        // 24시간 이전\n  const tooFuture = sched.nextRun > (now + 90 * 24 * 60 * 60 * 1000);   // 90일 이후\n  const invalid = !Number.isFinite(sched.nextRun);\n  if (invalid || tooPast || tooFuture) {\n    node.warn(`[${chamber}] 워치독: nextRun 비정상 감지 (nextRun=${sched.nextRun}) → 초기화`);\n    sched.lastRun = 0;\n    sched.nextRun = now + intervalMs;\n  }\n\n  // 3-b) (옵션) 간격 경계 정렬로 오차 누적 방지\n  // const aligned = Math.ceil(now / sched.intervalMs) * sched.intervalMs;\n  // sched.nextRun = aligned;\n  context.set(schedKey, sched);\n}\n\n// 아직 시간이 안 됐으면 스킵\nif (now < sched.nextRun) {\n  const sec = Math.round((sched.nextRun - now) / 1000);\n  node.log(`[${chamber}] 대기중 - ${sec}초 후 평가(주기=${avgMinutes}분)`);\n  return [null, null];\n}\n\n// 실행 시각 도달 → 다음 실행 예약\nsched.lastRun = now;\nsched.nextRun = now + sched.intervalMs;\ncontext.set(schedKey, sched);\nnode.log(`[${chamber}] 평가 실행(주기=${avgMinutes}분), 다음: ${new Date(sched.nextRun).toLocaleString()}`);\n\n// 4) Influx CSV에서 mean(_value) 읽기\nlet avgPyr = NaN;\ntry {\n  if (csvText && csvText.length > 0) {\n    // const lines = csvText.split(/\\r?\\n/).filter(Boolean);\n    \n    const lines = csvText\n      .split(/\\r?\\n/)\n      .filter(line => line && !line.startsWith('#') && !line.startsWith('//'));\n\n    if (lines.length >= 2) {\n      const header = lines[0].split(',');\n      const data = lines[1].split(',');\n      const idx = header.indexOf('_value');\n      if (idx >= 0 && data[idx] !== undefined) {\n        avgPyr = parseFloat(data[idx]);\n      }\n    }\n  }\n} catch (e) {\n  node.error(`[${chamber}] CSV 파싱 오류: ${e.message}`);\n}\n\nif (!Number.isFinite(avgPyr)) {\n  node.log(`[${chamber}] 평균 일사량 없음/무효 - 제어 스킵`);\n  return [null, null];\n}\n\n// 5) 단순 비교로 제어 결정(mean < threshold → ON, else OFF)\nconst desired = (avgPyr < threshold) ? 'ON' : 'OFF';\nconst stateKey = `led_state_${chamber}`;\nlet ledState = context.get(stateKey) || { current: 'OFF', lastChangeTime: now, lastSyncTime: now };\n\nlet controlAction = null;\nlet reason = `평균=${avgPyr.toFixed(2)} vs 기준=${threshold} → ${desired}`;\n\nif (ledState.current !== desired) {\n  controlAction = desired;\n  ledState.current = desired;\n  ledState.lastChangeTime = now;\n}\nledState.lastSyncTime = now;\ncontext.set(stateKey, ledState);\n\n// 6) MQTT(ESP32) - 상태가 바뀔 때만 발행\nlet mqttMessage = null;\nif (controlAction) {\n  const mqttPayload = {\n    type: 'control_led_drive',\n    controlType: 'led_drive',\n    mode: 'auto',\n    onoffValue: controlAction,\n    chamber_id: chamber,\n    ts: new Date().toISOString(),\n    auto_control: true,\n    avg_time_minutes: avgMinutes,\n    avg_pyr: Number(avgPyr.toFixed(3)),\n    threshold\n  };\n  mqttMessage = {\n    topic: `kist/control/site_001/${chamber}/edgeKIST_001/led_drive`,\n    payload: JSON.stringify(mqttPayload)\n  };\n}\n\n// 7) Influx 제어 로그(항상 기록)\nconst fields = [\n  `reason=\"${reason.replace(/\"/g, '\\\\\"')}\"`,\n  `mode=\"auto\"`,\n  `current_state=\"${ledState.current}\"`,\n  `onoffValue=\"${ledState.current}\"`,\n  `avg_pyr=${avgPyr.toFixed(3)}`,\n  `threshold=${threshold}`,\n  `avg_time=${avgMinutes}i`,\n  `control_source=\"strict_scheduler\"`,\n  `action_taken=${controlAction ? '1i' : '0i'}`\n];\n\nconst influxMessage = {\n  payload: `kocControl,org_id=KIST,site_id=site_001,collector_id=edgeKIST_001,chamber_id=${chamber},control_type=led_drive,source=node-red,result=OK ${fields.join(',')} ${now}000000`\n};\n\nif (controlAction) {\n  node.log(`[${chamber}] LED ${controlAction} 실행 - ${reason}`);\n} else {\n  node.log(`[${chamber}] LED 상태유지(${ledState.current}) - ${reason}`);\n}\n\nreturn [mqttMessage, influxMessage];",
+        "outputs": 2,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1350,
+        "y": 840,
+        "wires": [
+            [
+                "4d35ed9bcd602442",
+                "0c9ba8e611513469"
+            ],
+            [
+                "58e1418482a73281",
+                "e162ec732c40e7a1"
+            ]
+        ]
+    },
+    {
+        "id": "6ad95895c93774d2",
+        "type": "mqtt in",
+        "z": "2ced808b3820b5c5",
+        "name": "센서 데이터 수신",
+        "topic": "kist/+/+/+/telemetry/minute",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "fe5f57faf4c94451",
+        "inputs": 0,
+        "x": 280,
+        "y": 120,
+        "wires": [
+            [
+                "7b8c936037204bf6",
+                "04d485e51e861589"
+            ]
+        ]
+    },
+    {
+        "id": "7b8c936037204bf6",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "센서 데이터 저장",
+        "func": "const p = (typeof msg.payload === 'string') ? JSON.parse(msg.payload) : (msg.payload || {});\nconst m = /^kist\\/([^/]+)\\/([^/]+)\\/([^/]+)\\/telemetry\\/minute$/.exec(msg.topic || \"\");\nif (!m) { node.log(\"Unexpected topic: \" + msg.topic); return null; }\nconst [_, site_id, chamber_id, collector_id] = m;\n\nif (collector_id === 'edgeKIST') {\n    node.log(\"Ignoring edgeKIST topic: \" + msg.topic);\n    return null;\n}\n\np.org_id = p.org_id || \"KIST\";\np.site_id = p.site_id || site_id;\np.chamber_id = p.chamber_id || chamber_id;\np.collector_id = p.collector_id || collector_id;\np.fw_version = p.fw_version || \"unknown\";\np.sensors = p.sensors || {};\n\np.timestamp = new Date().toISOString();\n\nconst tsMs = Date.parse(p.timestamp);\nconst tsNs = (BigInt(tsMs) * 1000000n).toString();\n\nfunction escTag(v) {\n    return String(v).replace(/[\\s,=]/g, \"\\\\$&\");\n}\n\nfunction fFloat(k, v) {\n    const n = Number(v);\n    return Number.isFinite(n) ? `${k}=${n}` : null;\n}\n\nconst tagsData = [\n    `org_id=${escTag(p.org_id)}`,\n    `site_id=${escTag(p.site_id)}`,\n    `chamber_id=${escTag(p.chamber_id)}`,\n    `collector_id=${escTag(p.collector_id)}`,\n    `fw_version=${escTag(p.fw_version)}`\n].join(\",\");\n\nconst fieldsData = [\n    fFloat(\"pyrRaw\", p.sensors.pyrRaw),\n    fFloat(\"tRaw\", p.sensors.tRaw),\n    fFloat(\"hRaw\", p.sensors.hRaw),\n    fFloat(\"co2Raw\", p.sensors.co2Raw),\n    fFloat(\"tBME\", p.sensors.tBME),\n    fFloat(\"hBME\", p.sensors.hBME)\n].filter(Boolean);\n\nif (!p.sensors.pyrRaw) {\n    node.log(`[${chamber_id}] pyrRaw 없음 - 데이터 스킵`);\n    return null;\n}\n\nif (fieldsData.length === 0) {\n    node.log(\"No valid data to write\");\n    return null;\n}\n\nconst lineProtocol = `kocData,${tagsData} ${fieldsData.join(\",\")} ${tsNs}`;\n\nmsg.payload = lineProtocol;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 120,
+        "wires": [
+            [
+                "bb2ba36c1799197c",
+                "338dd94832f90c92"
+            ]
+        ]
+    },
+    {
+        "id": "bb2ba36c1799197c",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB 센서 데이터 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 710,
+        "y": 120,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "3b981b0854099221",
+        "type": "http in",
+        "z": "2ced808b3820b5c5",
+        "name": "GET /control",
+        "url": "/control",
+        "method": "get",
+        "x": 270,
+        "y": 500,
+        "wires": [
+            [
+                "13a1746ab885970b"
+            ]
+        ]
+    },
+    {
+        "id": "13a1746ab885970b",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "사용자 설정 처리 (개선)",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\nconst q = (msg.req && msg.req.query) || {};\nconst controlType = String(q.controlType || '').trim();\n\nconst ALLOWED = ['exhaust_fan', 'air_damper', 'temperature_set', 'led_drive'];\nif (!ALLOWED.includes(controlType)) {\n    msg.statusCode = 400;\n    msg.payload = { ok: false, error: '지원하지 않는 제어 타입: ' + controlType };\n    return [null, msg];\n}\n\nlet chamber = String(q.chamber_id || 'chamber_001').trim();\nif (!/^chamber_\\d{3}$/.test(chamber)) {\n    msg.statusCode = 400;\n    msg.payload = { ok: false, error: 'invalid chamber_id' };\n    return [null, msg];\n}\n\nnode.log('=== ' + controlType + ' 설정 처리: ' + chamber + ' ===');\nnode.log('받은 파라미터: ' + JSON.stringify(q));\n\n// InfluxDB 저장용 데이터 준비\nconst tags = [\n    'org_id=KIST',\n    'site_id=site_001',\n    'collector_id=edgeKIST_001',\n    'chamber_id=' + chamber,\n    'control_type=' + controlType\n].join(',');\n\nconst F = [];\nconst mode = q.mode ? String(q.mode).toLowerCase() : undefined;\nconst onoffValue = q.onoffValue ? String(q.onoffValue).toUpperCase() : undefined;\n\nif (mode) F.push('mode=\"' + mode + '\"');\n\n// 제어 관련 메시지들 초기화\nlet timerManagerMsg = null;\nlet mqttManualMsg = null;\nlet ledStatusMsg = null;\n\n// 수동 제어 처리\nif (mode === 'manual' && onoffValue && \n    (controlType === 'led_drive' || controlType === 'exhaust_fan' || controlType === 'air_damper')) {\n    F.push('onoffValue=\"' + onoffValue + '\"');\n    \n    // 자동 제어 중지\n    timerManagerMsg = {\n        action: 'stop_auto_control',\n        chamber_id: chamber,\n        controlType: controlType\n    };\n    \n    // MQTT 수동 제어 메시지\n    mqttManualMsg = {\n        topic: `kist/control/site_001/${chamber}/edgeKIST_001/${controlType}`,\n        payload: JSON.stringify({\n            type: `control_${controlType}`,\n            controlType: controlType,\n            mode: \"manual\",\n            onoffValue: onoffValue,\n            chamber_id: chamber,\n            ts: new Date().toISOString(),\n            source: \"manual_button\"\n        })\n    };\n    \n    // LED 수동 제어 시 상태 저장\n    if (controlType === 'led_drive') {\n        const statusValue = (onoffValue === 'ON') ? 1 : 0;\n        const now = new Date();\n        const utcTimestamp = now.toISOString();\n        const tsMs = Date.parse(utcTimestamp);\n        const tsNs = (BigInt(tsMs) * 1000000n).toString();\n        \n        ledStatusMsg = {\n            payload: `kocControl,org_id=KIST,site_id=site_001,chamber_id=${chamber},collector_id=edgeKIST_001,control_type=led_drive led_actual_status=${statusValue} ${tsNs}`\n        };\n        \n        node.log(`LED 수동 상태 저장: ${chamber} ${onoffValue} (${statusValue})`);\n    }\n    \n    node.log(`${controlType} 수동 제어: ${onoffValue}`);\n}\n\n// 자동 모드 처리\nif (mode === 'auto' && (controlType === 'led_drive' || controlType === 'air_damper')) {\n    const avgTime = q.avgTime ? parseInt(q.avgTime, 10) : (controlType === 'led_drive' ? 15 : 10);\n    const setPoint = q.setPoint ? Number(q.setPoint) : (controlType === 'led_drive' ? 300 : 25);\n    \n    if (Number.isFinite(avgTime) && Number.isFinite(setPoint)) {\n        F.push('setPoint=' + setPoint);\n        F.push('avgTime=' + avgTime + 'i');\n        \n        timerManagerMsg = {\n            action: 'start_auto_control',\n            chamber_id: chamber,\n            controlType: controlType,\n            config: {\n                avgTime: avgTime,\n                setPoint: setPoint,\n                sensorField: controlType === 'led_drive' ? 'pyrRaw' : 'tRaw'\n            }\n        };\n        \n        node.log(`${controlType} 자동모드: ${avgTime}분, 기준 ${setPoint}${controlType === 'led_drive' ? ' W/m²' : '°C'}`);\n    }\n}\n\n// 온도 설정 처리\nif (controlType === 'temperature_set') {\n    if (q.tempSetPoint !== undefined) {\n        const val = Number(q.tempSetPoint);\n        if (Number.isFinite(val)) F.push('tempSetPoint=' + val);\n    }\n    if (q.temp_avg_time !== undefined) {\n        const val = parseInt(q.temp_avg_time, 10);\n        if (Number.isFinite(val)) F.push('temp_avg_time=' + val + 'i');\n    }\n}\n\nF.push('control_source=\"web_ui\"');\nF.push('control_timestamp=' + Date.now() + 'i');\n\nif (!F.length) {\n    msg.statusCode = 400;\n    msg.payload = { ok: false, error: 'no fields' };\n    return [null, msg];\n}\n\n// UTC 시간으로 통일\nconst now = new Date();\nconst utcTimestamp = now.toISOString();\nconst tsMs = Date.parse(utcTimestamp);\nconst tsNs = (BigInt(tsMs) * 1000000n).toString();\n\nconst influxMsg = {\n    payload: 'kocControl,' + tags + ' ' + F.join(',') + ' ' + tsNs,\n    req: msg.req,\n    res: msg.res\n};\n\nnode.log('저장 시각: ' + utcTimestamp);\nnode.log('저장: ' + influxMsg.payload);\n\n// 출력: [설정저장, HTTP응답, 타이머관리, MQTT제어, LED상태저장]\nreturn [influxMsg, null, timerManagerMsg, mqttManualMsg, ledStatusMsg];",
+        "outputs": 5,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 490,
+        "y": 500,
+        "wires": [
+            [
+                "97581f5f75dfe28a",
+                "3e61da5d53ff514f"
+            ],
+            [
+                "b67cf7725efe68f1"
+            ],
+            [
+                "57e425202fe4b45c",
+                "0d518871052de13c"
+            ],
+            [
+                "12800983df7804ed",
+                "38751bbf49bede67"
+            ],
+            [
+                "a22762f30117f77b",
+                "310be298f7407c1e"
+            ]
+        ]
+    },
+    {
+        "id": "97581f5f75dfe28a",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB 설정 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 730,
+        "y": 320,
+        "wires": [
+            [
+                "ea39d406a560c1ea",
+                "d671b6b1579f69ce"
+            ]
+        ]
+    },
+    {
+        "id": "ea39d406a560c1ea",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "HTTP 200 응답",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\nmsg.statusCode = 200;\nmsg.headers = { \n    'Content-Type':'application/json; charset=utf-8', \n    'Access-Control-Allow-Origin':'*',\n    'Cache-Control': 'no-cache'\n};\nmsg.payload = { ok: true, message: '설정이 저장되었습니다' };\nreturn msg;",
+        "outputs": 1,
+        "x": 940,
+        "y": 320,
+        "wires": [
+            [
+                "b67cf7725efe68f1"
+            ]
+        ]
+    },
+    {
+        "id": "b67cf7725efe68f1",
+        "type": "http response",
+        "z": "2ced808b3820b5c5",
+        "name": "HTTP 응답",
+        "x": 1130,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "57e425202fe4b45c",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "통합 타이머 매니저",
+        "func": "\n// 통합 타이머 매니저 클래스 정의\nfunction createTimerManager() {\n    return {\n        // 자동 제어 시작\n        startAutoControl: function(chamber, controlType, config) {\n            // 지원되지 않는 제어 타입 체크\n            if (!['led_drive', 'air_damper'].includes(controlType)) {\n                node.log(`[${chamber}] ${controlType}는 자동 제어를 지원하지 않습니다`);\n                return false;\n            }\n            \n            // 기존 제어 중지\n            this.stopAutoControl(chamber, controlType);\n            \n            // 설정 검증\n            if (!this.validateConfig(config)) {\n                node.error(`Invalid config for ${chamber}:${controlType}`);\n                return false;\n            }\n            \n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            // 상태 저장\n            autoControl[controlType].states[chamber] = {\n                ...config,\n                startedAt: new Date().toISOString(),\n                cycleNumber: 0,\n                isActive: true\n            };\n            \n            // 첫 실행 스케줄링\n            const delayMs = config.avgTime * 60 * 1000;\n            autoControl[controlType].timers[chamber] = setTimeout(() => {\n                this.executeControlCycle(chamber, controlType);\n            }, delayMs);\n            \n            global.set('autoControl', autoControl);\n            \n            node.log(`[${chamber}] ${controlType} 자동제어 시작: ${config.avgTime}분/${config.setPoint}`);\n            return true;\n        },\n        \n        // 자동 제어 중지\n        stopAutoControl: function(chamber, controlType) {\n            // 지원되지 않는 제어 타입은 건너뛰기\n            if (!['led_drive', 'air_damper'].includes(controlType)) {\n                node.log(`[${chamber}] ${controlType}는 자동 제어 대상이 아닙니다`);\n                return;\n            }\n            \n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            if (autoControl[controlType] && autoControl[controlType].timers && autoControl[controlType].timers[chamber]) {\n                clearTimeout(autoControl[controlType].timers[chamber]);\n                delete autoControl[controlType].timers[chamber];\n                node.log(`[${chamber}] ${controlType} 타이머 중지`);\n            }\n            \n            if (autoControl[controlType] && autoControl[controlType].states && autoControl[controlType].states[chamber]) {\n                autoControl[controlType].states[chamber].isActive = false;\n                delete autoControl[controlType].states[chamber];\n            }\n            \n            global.set('autoControl', autoControl);\n        },\n        \n        // 제어 사이클 실행\n        executeControlCycle: function(chamber, controlType) {\n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            if (!autoControl[controlType] || !autoControl[controlType].states) {\n                node.log(`[${chamber}] ${controlType} 제어 객체가 없습니다`);\n                return;\n            }\n            \n            const state = autoControl[controlType].states[chamber];\n            \n            if (!state || !state.isActive) {\n                node.log(`[${chamber}] ${controlType} 상태 없음 또는 비활성`);\n                return;\n            }\n            \n            state.cycleNumber = (state.cycleNumber || 0) + 1;\n            state.lastExecutedAt = new Date().toISOString();\n            \n            // Flux 쿼리 생성\n            const fluxQuery = this.buildFluxQuery(chamber, state.sensorField);\n            \n            // 센서 데이터 조회 메시지 생성\n            const queryMsg = {\n                payload: fluxQuery,\n                chamber_id: chamber,\n                controlType: controlType,\n                state: { ...state }\n            };\n            \n            global.set('autoControl', autoControl);\n            \n            // 센서 데이터 조회 노드로 전송\n            node.send(queryMsg);\n        },\n        \n        // 설정 검증\n        validateConfig: function(config) {\n            return config && \n                   Number.isFinite(config.avgTime) && config.avgTime > 0 &&\n                   Number.isFinite(config.setPoint) &&\n                   typeof config.sensorField === 'string' && config.sensorField.length > 0;\n        },\n        \n        // Flux 쿼리 생성\n        buildFluxQuery: function(chamber, sensorField) {\n            return `from(bucket: \"KISTopenChamber\")\n                |> range(start: -6h)\n                |> filter(fn: (r) => r._measurement == \"kocData\" and r.chamber_id == \"${chamber}\" and r._field == \"${sensorField}\")\n                |> mean()\n                |> keep(columns: [\"_value\"])`;\n        }\n    };\n}\n\n// 타이머 매니저 인스턴스 생성\nconst timerManager = createTimerManager();\n\nif (!msg.action) {\n    return null;\n}\n\nconst chamber = msg.chamber_id || 'chamber_001';\nconst controlType = msg.controlType || 'led_drive';\nconst action = msg.action;\n\nif (action === 'stop_auto_control') {\n    timerManager.stopAutoControl(chamber, controlType);\n} else if (action === 'start_auto_control' && msg.config) {\n    timerManager.startAutoControl(chamber, controlType, msg.config);\n}\n\nreturn null;\n\n\n\n// // 통합 타이머 매니저 클래스 정의\n// function createTimerManager() {\n//     return {\n//         // 자동 제어 시작\n//         startAutoControl: function(chamber, controlType, config) {\n//             // 기존 제어 중지\n//             this.stopAutoControl(chamber, controlType);\n            \n//             // 설정 검증\n//             if (!this.validateConfig(config)) {\n//                 node.error(`Invalid config for ${chamber}:${controlType}`);\n//                 return false;\n//             }\n            \n//             const autoControl = global.get('autoControl') || {\n//                 led_drive: { timers: {}, states: {} },\n//                 air_damper: { timers: {}, states: {} }\n//             };\n            \n//             // 상태 저장\n//             autoControl[controlType].states[chamber] = {\n//                 ...config,\n//                 startedAt: new Date().toISOString(),\n//                 cycleNumber: 0,\n//                 isActive: true\n//             };\n            \n//             // 첫 실행 스케줄링\n//             const delayMs = config.avgTime * 60 * 1000;\n//             autoControl[controlType].timers[chamber] = setTimeout(() => {\n//                 this.executeControlCycle(chamber, controlType);\n//             }, delayMs);\n            \n//             global.set('autoControl', autoControl);\n            \n//             node.log(`[${chamber}] ${controlType} 자동제어 시작: ${config.avgTime}분/${config.setPoint}`);\n//             return true;\n//         },\n        \n//         // 자동 제어 중지\n//         stopAutoControl: function(chamber, controlType) {\n//             const autoControl = global.get('autoControl') || {\n//                 led_drive: { timers: {}, states: {} },\n//                 air_damper: { timers: {}, states: {} }\n//             };\n            \n//             if (autoControl[controlType].timers[chamber]) {\n//                 clearTimeout(autoControl[controlType].timers[chamber]);\n//                 delete autoControl[controlType].timers[chamber];\n//                 node.log(`[${chamber}] ${controlType} 타이머 중지`);\n//             }\n            \n//             if (autoControl[controlType].states[chamber]) {\n//                 autoControl[controlType].states[chamber].isActive = false;\n//                 delete autoControl[controlType].states[chamber];\n//             }\n            \n//             global.set('autoControl', autoControl);\n//         },\n        \n//         // 제어 사이클 실행\n//         executeControlCycle: function(chamber, controlType) {\n//             const autoControl = global.get('autoControl') || {\n//                 led_drive: { timers: {}, states: {} },\n//                 air_damper: { timers: {}, states: {} }\n//             };\n            \n//             const state = autoControl[controlType].states[chamber];\n            \n//             if (!state || !state.isActive) {\n//                 node.log(`[${chamber}] ${controlType} 상태 없음 또는 비활성`);\n//                 return;\n//             }\n            \n//             state.cycleNumber = (state.cycleNumber || 0) + 1;\n//             state.lastExecutedAt = new Date().toISOString();\n            \n//             // Flux 쿼리 생성\n//             const fluxQuery = this.buildFluxQuery(chamber, state.sensorField);\n            \n//             // 센서 데이터 조회 메시지 생성\n//             const queryMsg = {\n//                 payload: fluxQuery,\n//                 chamber_id: chamber,\n//                 controlType: controlType,\n//                 state: { ...state }\n//             };\n            \n//             global.set('autoControl', autoControl);\n            \n//             // 센서 데이터 조회 노드로 전송\n//             node.send(queryMsg);\n//         },\n        \n//         // 설정 검증\n//         validateConfig: function(config) {\n//             return config && \n//                    Number.isFinite(config.avgTime) && config.avgTime > 0 &&\n//                    Number.isFinite(config.setPoint) &&\n//                    typeof config.sensorField === 'string' && config.sensorField.length > 0;\n//         },\n        \n//         // Flux 쿼리 생성\n//         buildFluxQuery: function(chamber, sensorField) {\n//             return `from(bucket: \"KISTopenChamber\")\n//                 |> range(start: -6h)\n//                 |> filter(fn: (r) => r._measurement == \"kocData\" and r.chamber_id == \"${chamber}\" and r._field == \"${sensorField}\")\n//                 |> mean()\n//                 |> keep(columns: [\"_value\"])`;\n//         }\n//     };\n// }\n\n// // 타이머 매니저 인스턴스 생성\n// const timerManager = createTimerManager();\n\n// if (!msg.action) {\n//     return null;\n// }\n\n// const chamber = msg.chamber_id || 'chamber_001';\n// const controlType = msg.controlType || 'led_drive';\n// const action = msg.action;\n\n// if (action === 'stop_auto_control') {\n//     timerManager.stopAutoControl(chamber, controlType);\n// } else if (action === 'start_auto_control' && msg.config) {\n//     timerManager.startAutoControl(chamber, controlType, msg.config);\n// }\n\n// return null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 750,
+        "y": 560,
+        "wires": [
+            [
+                "33343f2a69cc8bfe",
+                "309f49f5e3bac2c7"
+            ]
+        ]
+    },
+    {
+        "id": "33343f2a69cc8bfe",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB 센서 데이터 조회",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 990,
+        "y": 560,
+        "wires": [
+            [
+                "49c07b823c1a6514",
+                "cbacafdaa07f739d"
+            ]
+        ]
+    },
+    {
+        "id": "49c07b823c1a6514",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "제어 판단 및 스케줄러",
+        "func": "// 타이머 매니저 클래스 정의 (동일한 구조 유지)\nfunction createTimerManager() {\n    return {\n        // 제어 판단 및 다음 사이클 스케줄링\n        processControlDecision: function(chamber, controlType, avgValue, state) {\n            if (!state || !state.isActive) return [null, null];\n            \n            const decision = this.makeControlDecision(controlType, avgValue, state.setPoint);\n            \n            if (decision.shouldControl) {\n                // MQTT 메시지 생성\n                const mqttMsg = this.createMqttMessage(chamber, controlType, decision, state);\n                \n                // LED 상태 저장 메시지 생성 (LED인 경우)\n                const statusMsg = controlType === 'led_drive' ? \n                    this.createStatusMessage(chamber, decision.onoffValue) : null;\n                \n                // 다음 사이클 스케줄링\n                this.scheduleNextCycle(chamber, controlType, state);\n                \n                return [mqttMsg, statusMsg];\n            } else {\n                // 데이터 없음 - 재시도 스케줄링\n                this.scheduleRetry(chamber, controlType, state);\n                return [null, null];\n            }\n        },\n        \n        // 제어 판단 로직\n        makeControlDecision: function(controlType, avgValue, setPoint) {\n            if (!Number.isFinite(avgValue)) {\n                return { shouldControl: false, reason: '데이터 없음' };\n            }\n            \n            let onoffValue, reason;\n            \n            if (controlType === 'led_drive') {\n                onoffValue = avgValue < setPoint ? 'ON' : 'OFF';\n                reason = `평균 ${avgValue.toFixed(1)}W/m² ${avgValue < setPoint ? '<' : '>='} 기준 ${setPoint}W/m²`;\n            } else {\n                onoffValue = avgValue >= setPoint ? 'ON' : 'OFF';\n                reason = `평균 ${avgValue.toFixed(1)}°C ${avgValue >= setPoint ? '>=' : '<'} 기준 ${setPoint}°C`;\n            }\n            \n            return { shouldControl: true, onoffValue, reason };\n        },\n        \n        // 다음 사이클 스케줄링\n        scheduleNextCycle: function(chamber, controlType, state) {\n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            // 기존 타이머 정리\n            if (autoControl[controlType].timers[chamber]) {\n                clearTimeout(autoControl[controlType].timers[chamber]);\n            }\n            \n            const delayMs = state.avgTime * 60 * 1000;\n            const nextTime = new Date(Date.now() + delayMs);\n            \n            autoControl[controlType].timers[chamber] = setTimeout(() => {\n                this.executeControlCycle(chamber, controlType);\n            }, delayMs);\n            \n            global.set('autoControl', autoControl);\n            \n            node.log(`[${chamber}] ${controlType} 다음 실행: ${nextTime.toLocaleTimeString()}`);\n        },\n        \n        // 재시도 스케줄링 (데이터 없을 때)\n        scheduleRetry: function(chamber, controlType, state) {\n            const retryDelayMs = 5 * 60 * 1000; // 5분 후 재시도\n            \n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            if (autoControl[controlType].timers[chamber]) {\n                clearTimeout(autoControl[controlType].timers[chamber]);\n            }\n            \n            autoControl[controlType].timers[chamber] = setTimeout(() => {\n                this.executeControlCycle(chamber, controlType);\n            }, retryDelayMs);\n            \n            global.set('autoControl', autoControl);\n            \n            node.log(`[${chamber}] ${controlType} 데이터 없음 - 5분 후 재시도`);\n        },\n        \n        // 제어 사이클 실행 (타이머 매니저와 동일)\n        executeControlCycle: function(chamber, controlType) {\n            const autoControl = global.get('autoControl') || {\n                led_drive: { timers: {}, states: {} },\n                air_damper: { timers: {}, states: {} }\n            };\n            \n            const state = autoControl[controlType].states[chamber];\n            \n            if (!state || !state.isActive) {\n                node.log(`[${chamber}] ${controlType} 상태 없음 또는 비활성`);\n                return;\n            }\n            \n            state.cycleNumber = (state.cycleNumber || 0) + 1;\n            state.lastExecutedAt = new Date().toISOString();\n            \n            // Flux 쿼리 생성\n            const fluxQuery = this.buildFluxQuery(chamber, state.sensorField);\n            \n            // 센서 데이터 조회 메시지 생성\n            const queryMsg = {\n                payload: fluxQuery,\n                chamber_id: chamber,\n                controlType: controlType,\n                state: { ...state }\n            };\n            \n            global.set('autoControl', autoControl);\n            \n            // 이전 노드로 다시 전송\n            node.send([null, null, queryMsg]);\n        },\n        \n        buildFluxQuery: function(chamber, sensorField) {\n            return `from(bucket: \"KISTopenChamber\")\n                |> range(start: -6h)\n                |> filter(fn: (r) => r._measurement == \"kocData\" and r.chamber_id == \"${chamber}\" and r._field == \"${sensorField}\")\n                |> mean()\n                |> keep(columns: [\"_value\"])`;\n        },\n        \n        // MQTT 메시지 생성\n        createMqttMessage: function(chamber, controlType, decision, state) {\n            return {\n                topic: `kist/control/site_001/${chamber}/edgeKIST_001/${controlType}`,\n                payload: JSON.stringify({\n                    type: `control_${controlType}`,\n                    controlType: controlType,\n                    mode: \"auto\",\n                    onoffValue: decision.onoffValue,\n                    chamber_id: chamber,\n                    ts: new Date().toISOString(),\n                    reason: decision.reason,\n                    cycleNumber: state.cycleNumber\n                })\n            };\n        },\n        \n        // LED 상태 메시지 생성\n        createStatusMessage: function(chamber, onoffValue) {\n            const statusValue = (onoffValue === 'ON') ? 1 : 0;\n            const now = new Date();\n            const utcTimestamp = now.toISOString();\n            const tsMs = Date.parse(utcTimestamp);\n            const tsNs = (BigInt(tsMs) * 1000000n).toString();\n            \n            return {\n                payload: `kocControl,org_id=KIST,site_id=site_001,chamber_id=${chamber},collector_id=edgeKIST_001,control_type=led_drive led_actual_status=${statusValue} ${tsNs}`\n            };\n        }\n    };\n}\n\nconst timerManager = createTimerManager();\n\nconst chamber = msg.chamber_id || 'chamber_001';\nconst controlType = msg.controlType || 'led_drive';\nconst state = msg.state;\nconst csv = (msg.payload || '').trim();\n\n// CSV에서 평균값 추출\nlet avgValue = NaN;\n\nif (csv && csv.length > 10) {\n    const lines = csv.split(/\\r?\\n/).filter(line => line.trim());\n    if (lines.length >= 2) {\n        const header = lines[0].split(',');\n        const dataLine = lines[1].split(',');\n        const valueIndex = header.indexOf('_value');\n        if (valueIndex >= 0 && dataLine[valueIndex]) {\n            avgValue = parseFloat(dataLine[valueIndex]);\n        }\n    }\n}\n\nnode.log(`[${chamber}] ${controlType} 평균값: ${Number.isFinite(avgValue) ? avgValue.toFixed(2) : 'N/A'}`);\n\n// 제어 판단 및 스케줄링\nconst [mqttMsg, statusMsg] = timerManager.processControlDecision(chamber, controlType, avgValue, state);\n\n// 출력: [MQTT제어, LED상태저장, 다음사이클쿼리]\nreturn [mqttMsg, statusMsg, null];",
+        "outputs": 3,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1250,
+        "y": 560,
+        "wires": [
+            [
+                "12800983df7804ed",
+                "e0de536b658e6b33"
+            ],
+            [
+                "a22762f30117f77b",
+                "b6140e7290e0ce2a"
+            ],
+            [
+                "33343f2a69cc8bfe",
+                "a10726e35d676ec0"
+            ]
+        ]
+    },
+    {
+        "id": "12800983df7804ed",
+        "type": "mqtt out",
+        "z": "2ced808b3820b5c5",
+        "name": "MQTT 제어",
+        "topic": "",
+        "broker": "fe5f57faf4c94451",
+        "x": 1550,
+        "y": 520,
+        "wires": []
+    },
+    {
+        "id": "a22762f30117f77b",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB LED 상태 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 1580,
+        "y": 600,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "b9906c5a172b28b7",
+        "type": "http in",
+        "z": "2ced808b3820b5c5",
+        "name": "GET /settings/latest",
+        "url": "/settings/latest",
+        "method": "get",
+        "x": 290,
+        "y": 280,
+        "wires": [
+            [
+                "5e6b5729092049ef"
+            ]
+        ]
+    },
+    {
+        "id": "5e6b5729092049ef",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "모든 설정 조회 Flux",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\nconst chamber = (msg.req && msg.req.query && msg.req.query.chamber_id) || 'chamber_001';\n\nmsg.payload = 'from(bucket: \"KISTopenChamber\")' +\n  '|> range(start: -7d)' +\n  '|> filter(fn: (r) => r._measurement == \"kocControl\")' +\n  '|> filter(fn: (r) => r.chamber_id == \"' + chamber + '\")' +\n  '|> tail(n: 50)';\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 510,
+        "y": 280,
+        "wires": [
+            [
+                "c86d058a58912de1",
+                "0ee5e54f589d1f6f"
+            ]
+        ]
+    },
+    {
+        "id": "c86d058a58912de1",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB 설정 조회",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 730,
+        "y": 280,
+        "wires": [
+            [
+                "eb0b72896b9f16ad",
+                "7ee9894da04786ce"
+            ]
+        ]
+    },
+    {
+        "id": "eb0b72896b9f16ad",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "설정 파싱",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\nconst csv = String(msg.payload || '').trim();\nconst settings = {\n    led_drive: { control_type: 'led_drive', mode: 'manual', onoffValue: 'OFF', setPoint: 300, avgTime: 15 },\n    exhaust_fan: { control_type: 'exhaust_fan', mode: 'manual', onoffValue: 'OFF' },\n    air_damper: { control_type: 'air_damper', mode: 'manual', onoffValue: 'OFF', setPoint: 25, avgTime: 10 }\n};\n\nif (csv && csv.length > 50) {\n    const lines = csv.split('\\n').filter(line => line.trim());\n    \n    if (lines.length >= 2) {\n        const header = lines[0].split(',').map(s => s.trim());\n        \n        // 각 제어 타입별 최신 데이터 수집\n        const latestData = {};\n        \n        for (let i = 1; i < lines.length; i++) {\n            const data = lines[i].split(',');\n            const row = {};\n            \n            header.forEach((h, idx) => {\n                if (data[idx] !== undefined && data[idx] !== '') {\n                    row[h] = data[idx].replace(/\"/g, '');\n                }\n            });\n            \n            const controlType = row.control_type;\n            const field = row._field;\n            const value = row._value;\n            const time = row._time;\n            \n            if (controlType && field && value !== undefined) {\n                if (!latestData[controlType]) {\n                    latestData[controlType] = {};\n                }\n                \n                // 시간별로 최신 데이터만 유지\n                if (!latestData[controlType][field] || time > latestData[controlType][field].time) {\n                    latestData[controlType][field] = { value, time };\n                }\n            }\n        }\n        \n        // LED 설정 복원\n        if (latestData.led_drive) {\n            const led = latestData.led_drive;\n            settings.led_drive = {\n                control_type: 'led_drive',\n                mode: led.mode ? led.mode.value : 'manual',\n                onoffValue: led.onoffValue ? led.onoffValue.value : 'OFF',\n                setPoint: led.setPoint ? Number(led.setPoint.value) : 300,\n                avgTime: led.avgTime ? Number(led.avgTime.value) : 15\n            };\n        }\n        \n        // 배기팬 설정 복원\n        if (latestData.exhaust_fan) {\n            const fan = latestData.exhaust_fan;\n            settings.exhaust_fan = {\n                control_type: 'exhaust_fan',\n                mode: fan.mode ? fan.mode.value : 'manual',\n                onoffValue: fan.onoffValue ? fan.onoffValue.value : 'OFF'\n            };\n        }\n        \n        // 에어댐퍼 설정 복원\n        if (latestData.air_damper) {\n            const damper = latestData.air_damper;\n            settings.air_damper = {\n                control_type: 'air_damper',\n                mode: damper.mode ? damper.mode.value : 'manual',\n                onoffValue: damper.onoffValue ? damper.onoffValue.value : 'OFF',\n                setPoint: damper.setPoint ? Number(damper.setPoint.value) : 25,\n                avgTime: damper.avgTime ? Number(damper.avgTime.value) : 10\n            };\n        }\n        \n        node.log(\"파싱된 최종 설정: \" + JSON.stringify(settings));\n    }\n}\n\nmsg.statusCode = 200;\nmsg.headers = { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' };\nmsg.payload = { ok: true, settings };\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 940,
+        "y": 280,
+        "wires": [
+            [
+                "b67cf7725efe68f1"
+            ]
+        ]
+    },
+    {
+        "id": "7b24304c7db3fa2c",
+        "type": "inject",
+        "z": "2ced808b3820b5c5",
+        "name": "자동복구",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "once": true,
+        "onceDelay": "3",
+        "payload": "start",
+        "x": 270,
+        "y": 760,
+        "wires": [
+            [
+                "3dc265e888e17761"
+            ]
+        ]
+    },
+    {
+        "id": "3dc265e888e17761",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "복구 Flux",
+        "func": "node.log('자동 복구 시작');\n\nmsg.payload = 'from(bucket: \"KISTopenChamber\")' +\n  '|> range(start: -7d)' +\n  '|> filter(fn: (r) => r._measurement == \"kocControl\" and (r.control_type == \"led_drive\" or r.control_type == \"air_damper\"))' +\n  '|> group(columns: [\"chamber_id\", \"control_type\", \"_field\"])' +\n  '|> sort(columns: [\"_time\"], desc: true)' +\n  '|> first()' +\n  '|> group(columns: [\"chamber_id\", \"control_type\"])' +\n  '|> pivot(rowKey: [\"chamber_id\", \"control_type\"], columnKey: [\"_field\"], valueColumn: \"_value\")';\n\nreturn msg;",
+        "outputs": 1,
+        "x": 450,
+        "y": 760,
+        "wires": [
+            [
+                "a749e7f73bebd879"
+            ]
+        ]
+    },
+    {
+        "id": "a749e7f73bebd879",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB 복구 조회",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 630,
+        "y": 760,
+        "wires": [
+            [
+                "af6ec97acbcc7807"
+            ]
+        ]
+    },
+    {
+        "id": "af6ec97acbcc7807",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "복구 파싱 및 실행",
+        "func": "const csv = (msg.payload || '').trim();\n\nif (!csv || csv.length < 50) return null;\n\nconst lines = csv.split(/\\r?\\n/).filter(line => line.trim());\nif (lines.length < 2) return null;\n\nconst header = lines[0].split(',').map(s => s.trim());\nconst recoveryMsgs = [];\n\nfor (let i = 1; i < lines.length; i++) {\n    const data = lines[i].split(',');\n    const row = {};\n    \n    header.forEach((h, idx) => {\n        if (data[idx] !== undefined && data[idx] !== '') row[h] = data[idx];\n    });\n    \n    if (!row.chamber_id || row.mode !== 'auto') continue;\n    \n    const avgTime = row.avgTime ? parseInt(row.avgTime, 10) : (row.control_type === 'led_drive' ? 15 : 10);\n    const setPoint = row.setPoint ? parseFloat(row.setPoint) : (row.control_type === 'led_drive' ? 300 : 25);\n    \n    if (!Number.isFinite(avgTime) || !Number.isFinite(setPoint)) continue;\n    \n    recoveryMsgs.push({\n        action: 'start_auto_control',\n        chamber_id: row.chamber_id,\n        controlType: row.control_type,\n        config: {\n            avgTime: avgTime,\n            setPoint: setPoint,\n            sensorField: row.control_type === 'led_drive' ? 'pyrRaw' : 'tRaw'\n        }\n    });\n    \n    node.log(`복구: [${row.chamber_id}] ${row.control_type} ${avgTime}분/${setPoint}`);\n}\n\nnode.log(`복구 완료: 총 ${recoveryMsgs.length}개 제어`);\n\n// 각 복구 메시지를 개별적으로 전송\nfor (let msg of recoveryMsgs) {\n    node.send(msg);\n}\n\nreturn null;",
+        "outputs": 1,
+        "x": 840,
+        "y": 760,
+        "wires": [
+            [
+                "57e425202fe4b45c"
+            ]
+        ]
+    },
+    {
+        "id": "97ba2fa02214f659",
+        "type": "http in",
+        "z": "2ced808b3820b5c5",
+        "name": "POST /save-ui-setting",
+        "url": "/save-ui-setting",
+        "method": "post",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 290,
+        "y": 900,
+        "wires": [
+            [
+                "5ce08d709e112a87"
+            ]
+        ]
+    },
+    {
+        "id": "5ce08d709e112a87",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "UI 설정 저장",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\n// 받은 line protocol 데이터를 그대로 전달\nconst lineProtocol = String(msg.payload || '').trim();\n\nif (!lineProtocol || lineProtocol.length < 10) {\n    msg.statusCode = 400;\n    msg.payload = { ok: false, error: 'Invalid data' };\n    return [null, msg];\n}\n\nnode.log('UI 설정 저장: ' + lineProtocol);\n\nconst influxMsg = {\n    payload: lineProtocol,\n    req: msg.req,\n    res: msg.res\n};\n\nreturn [influxMsg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 510,
+        "y": 900,
+        "wires": [
+            [
+                "ba728b243b441733",
+                "05bdfb03c3c37362"
+            ],
+            [
+                "6aad68e4bc3fba59",
+                "a735cb6b5dd1dd95"
+            ]
+        ]
+    },
+    {
+        "id": "ba728b243b441733",
+        "type": "http request",
+        "z": "2ced808b3820b5c5",
+        "name": "InfluxDB UI 설정 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 740,
+        "y": 880,
+        "wires": [
+            [
+                "0cd949e37f7206f1"
+            ]
+        ]
+    },
+    {
+        "id": "0cd949e37f7206f1",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "성공 응답",
+        "func": "if (!msg.req || !msg.res) {\n    node.error(\"HTTP request/response 객체가 없습니다\");\n    return null;\n}\n\nmsg.statusCode = 200;\nmsg.headers = { \n    'Content-Type': 'application/json; charset=utf-8', \n    'Access-Control-Allow-Origin': '*'\n};\nmsg.payload = { ok: true, message: 'UI 설정 저장됨' };\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 960,
+        "y": 880,
+        "wires": [
+            [
+                "6aad68e4bc3fba59",
+                "3bb8e9b5d9639b12"
+            ]
+        ]
+    },
+    {
+        "id": "6aad68e4bc3fba59",
+        "type": "http response",
+        "z": "2ced808b3820b5c5",
+        "name": "HTTP 응답",
+        "statusCode": "",
+        "headers": {},
+        "x": 1130,
+        "y": 940,
+        "wires": []
+    },
+    {
+        "id": "b47feabf28a7fc1f",
+        "type": "inject",
+        "z": "2ced808b3820b5c5",
+        "name": "타이머 헬스체크",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "payload": "health_check",
+        "x": 290,
+        "y": 660,
+        "wires": [
+            [
+                "5a28fc6c194b85e2"
+            ]
+        ]
+    },
+    {
+        "id": "5a28fc6c194b85e2",
+        "type": "function",
+        "z": "2ced808b3820b5c5",
+        "name": "타이머 상태 점검",
+        "func": "const autoControl = global.get('autoControl') || {\n    led_drive: { timers: {}, states: {} },\n    air_damper: { timers: {}, states: {} }\n};\n\nlet issuesFound = 0;\n\n// LED 타이머 상태 점검\nObject.keys(autoControl.led_drive.states).forEach(chamber => {\n    const state = autoControl.led_drive.states[chamber];\n    const timer = autoControl.led_drive.timers[chamber];\n    \n    if (state && state.isActive && !timer) {\n        node.warn(`[${chamber}] LED 상태는 활성이지만 타이머가 없음 - 복구 시도`);\n        \n        // 타이머 복구\n        const delayMs = (state.avgTime || 15) * 60 * 1000;\n        autoControl.led_drive.timers[chamber] = setTimeout(() => {\n            // 타이머 매니저의 executeControlCycle 호출\n            node.send({\n                chamber_id: chamber,\n                controlType: 'led_drive',\n                state: state,\n                action: 'execute_cycle'\n            });\n        }, delayMs);\n        \n        issuesFound++;\n    }\n});\n\n// 에어댐퍼 타이머 상태 점검\nObject.keys(autoControl.air_damper.states).forEach(chamber => {\n    const state = autoControl.air_damper.states[chamber];\n    const timer = autoControl.air_damper.timers[chamber];\n    \n    if (state && state.isActive && !timer) {\n        node.warn(`[${chamber}] 에어댐퍼 상태는 활성이지만 타이머가 없음 - 복구 시도`);\n        \n        // 타이머 복구\n        const delayMs = (state.avgTime || 10) * 60 * 1000;\n        autoControl.air_damper.timers[chamber] = setTimeout(() => {\n            // 타이머 매니저의 executeControlCycle 호출\n            node.send({\n                chamber_id: chamber,\n                controlType: 'air_damper',\n                state: state,\n                action: 'execute_cycle'\n            });\n        }, delayMs);\n        \n        issuesFound++;\n    }\n});\n\nglobal.set('autoControl', autoControl);\n\nif (issuesFound > 0) {\n    node.log(`타이머 헬스체크: ${issuesFound}개 이슈 복구됨`);\n} else {\n    node.log('타이머 헬스체크: 모든 상태 정상');\n}\n\nreturn null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 660,
+        "wires": [
+            [
+                "57e425202fe4b45c",
+                "03dbd560d753531a"
+            ]
+        ]
+    },
+    {
+        "id": "338dd94832f90c92",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 15",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 660,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "04d485e51e861589",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 16",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 460,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "e0de536b658e6b33",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 17",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1540,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "b6140e7290e0ce2a",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 18",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1540,
+        "y": 640,
+        "wires": []
+    },
+    {
+        "id": "309f49f5e3bac2c7",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 19",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 940,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "a10726e35d676ec0",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 20",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1500,
+        "y": 720,
+        "wires": []
+    },
+    {
+        "id": "0ee5e54f589d1f6f",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 21",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "7ee9894da04786ce",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 22",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 940,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "d671b6b1579f69ce",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 23",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 920,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "cbacafdaa07f739d",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 24",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1220,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "05bdfb03c3c37362",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 25",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 840,
+        "wires": []
+    },
+    {
+        "id": "a735cb6b5dd1dd95",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 26",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 940,
+        "wires": []
+    },
+    {
+        "id": "3bb8e9b5d9639b12",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 31",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1140,
+        "y": 880,
+        "wires": []
+    },
+    {
+        "id": "3e61da5d53ff514f",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 32",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "0d518871052de13c",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 33",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 800,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "310be298f7407c1e",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 34",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 740,
+        "y": 680,
+        "wires": []
+    },
+    {
+        "id": "38751bbf49bede67",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 35",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1100,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "03dbd560d753531a",
+        "type": "debug",
+        "z": "2ced808b3820b5c5",
+        "name": "debug 36",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 740,
+        "y": 620,
+        "wires": []
+    },
+    {
+        "id": "5d833ce5ffc9a087",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "debug 3",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 780,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "cadad03de8b8aa8c",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "debug 4",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1060,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "9ca58bb807f4b884",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 600,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "d55288139b43ebd9",
+        "type": "mqtt in",
+        "z": "7e65b47e49f97f97",
+        "name": "센서 데이터 수신",
+        "topic": "kist/+/+/+/telemetry/minute",
+        "qos": "0",
+        "datatype": "json",
+        "broker": "fe5f57faf4c94451",
+        "inputs": 0,
+        "x": 380,
+        "y": 200,
+        "wires": [
+            [
+                "7d50ed816677e428",
+                "8c910b015b13860e"
+            ]
+        ]
+    },
+    {
+        "id": "7d50ed816677e428",
+        "type": "function",
+        "z": "7e65b47e49f97f97",
+        "name": "DLI 누적 계산",
+        "func": "// pyrRaw 추출\nconst p = (typeof msg.payload === 'string') ? JSON.parse(msg.payload) : (msg.payload || {});\nconst m = /^kist\\/([^/]+)\\/([^/]+)\\/([^/]+)\\/telemetry\\/minute$/.exec(msg.topic || \"\");\n\nif (!m) return null;\n\nconst [_, site_id, chamber_id, collector_id] = m;\nconst pyrRaw = p.sensors?.pyrRaw;\n\nif (!Number.isFinite(pyrRaw) || pyrRaw < 0) return null;\n\n// PAR 변환 (W/m² → μmol/m²/s)\n// 전체 일사량의 약 45%가 PAR 영역, 변환계수 4.57\nconst PAR = pyrRaw * 0.45 * 4.57;\n\n// 현재 날짜 (한국시간)\nconst now = new Date();\nconst dateKey = now.toISOString().split('T')[0]; // YYYY-MM-DD\n\n// 챔버별 DLI 누적값 저장소\nconst dliData = global.get('dli_accumulation') || {};\nconst key = `${chamber_id}_${dateKey}`;\n\nif (!dliData[key]) {\n    dliData[key] = {\n        chamber_id: chamber_id,\n        date: dateKey,\n        accumulated_par: 0,\n        data_points: 0,\n        start_time: now.toISOString()\n    };\n}\n\n// 10초 간격 측정이므로 10초 * PAR 누적\n// DLI = mol/m²/day = (μmol/m²/s × seconds) / 1,000,000\n// dliData[key].accumulated_par += PAR * 10;\ndliData[key].accumulated_par += PAR * 60;\ndliData[key].data_points += 1;\ndliData[key].last_update = now.toISOString();\n\nglobal.set('dli_accumulation', dliData);\n\nnode.log(`[${chamber_id}] ${dateKey} PAR누적: ${dliData[key].accumulated_par.toFixed(0)} μmol/m² (${dliData[key].data_points}개 포인트)`);\n\nreturn null;",
+        "outputs": 0,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 610,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "94e98d16aaa0b265",
+        "type": "inject",
+        "z": "7e65b47e49f97f97",
+        "name": "매일 23:59 트리거",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "59 23 * * *",
+        "once": false,
+        "onceDelay": "",
+        "topic": "",
+        "payload": "calculate_dli",
+        "payloadType": "str",
+        "x": 390,
+        "y": 340,
+        "wires": [
+            [
+                "0c1c9c473d7ff9cd",
+                "9ca58bb807f4b884"
+            ]
+        ]
+    },
+    {
+        "id": "0c1c9c473d7ff9cd",
+        "type": "function",
+        "z": "7e65b47e49f97f97",
+        "name": "DLI 최종 계산",
+        "func": "// =====================================================\n// 2. \"DLI 최종 계산\" 노드 - UTC로 수정\n// =====================================================\n\nconst dliData = global.get('dli_accumulation') || {};\n\n// UTC 기준 오늘 날짜 (한국시간 변환 제거)\nconst now = new Date();\nconst dateKey = now.toISOString().split('T')[0]; // UTC 날짜 사용\n\nnode.log(`===== DLI 최종 계산: ${dateKey} (UTC) =====`);\n\nconst results = [];\n\nfor (const key in dliData) {\n    if (key.endsWith(`_${dateKey}`)) {\n        const data = dliData[key];\n        \n        // DLI = accumulated_par / 1,000,000 (mol/m²/day)\n        const dli = data.accumulated_par / 1000000;\n        \n        node.log(`[${data.chamber_id}] ${dateKey} DLI: ${dli.toFixed(2)} mol/m²/day (${data.data_points}개 측정)`);\n        \n        results.push({\n            chamber_id: data.chamber_id,\n            date: data.date,\n            dli: dli,\n            data_points: data.data_points,\n            start_time: data.start_time,\n            end_time: data.last_update\n        });\n        \n        // 계산 완료 후 해당 날짜 데이터 삭제\n        delete dliData[key];\n    }\n}\n\nglobal.set('dli_accumulation', dliData);\n\nif (results.length === 0) {\n    node.log(`${dateKey} DLI 데이터 없음`);\n    node.log(`저장소 키 목록: ${Object.keys(dliData).join(', ')}`);\n    return null;\n}\n\nnode.log(`${results.length}개 챔버 DLI 계산 완료`);\n\nmsg.payload = results;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 610,
+        "y": 340,
+        "wires": [
+            [
+                "2fd09166c327acbc",
+                "5d833ce5ffc9a087"
+            ]
+        ]
+    },
+    {
+        "id": "2fd09166c327acbc",
+        "type": "function",
+        "z": "7e65b47e49f97f97",
+        "name": "InfluxDB Line Protocol 생성",
+        "func": "// =====================================================\n// \"InfluxDB Line Protocol 생성\" 노드 수정\n// =====================================================\n\nconst results = msg.payload || [];\n\nif (!Array.isArray(results) || results.length === 0) return null;\n\nconst lines = [];\n\nfor (const r of results) {\n    // 핵심: 한국시간 23:59:59를 UTC로 저장하되, \n    // Grafana가 올바른 날짜로 인식하도록 타임스탬프 조정\n    \n    // 방법: 해당 날짜의 UTC 12:00:00에 저장\n    // 이렇게 하면 어떤 시간대에서도 같은 날짜로 표시됨\n    const timestamp = new Date(r.date + 'T12:00:00.000Z').getTime();\n    const tsNs = (BigInt(timestamp) * 1000000n).toString();\n\n    node.log(`${r.chamber_id} ${r.date} DLI: ${r.dli.toFixed(4)} mol/m²/day`);\n    node.log(`저장 시간: ${new Date(timestamp).toISOString()} (UTC 정오)`);\n\n    const tags = [\n        `org_id=KIST`,\n        `site_id=site_001`,\n        `chamber_id=${r.chamber_id}`\n    ].join(',');\n\n    const fields = [\n        `dli=${r.dli.toFixed(6)}`,\n        `data_points=${r.data_points}i`\n    ].join(',');\n\n    lines.push(`kocDLI,${tags} ${fields} ${tsNs}`);\n}\n\nmsg.payload = lines.join('\\n');\nnode.log(`DLI ${results.length}개 챔버 저장 준비`);\n\nreturn msg;\n\n// const results = msg.payload || [];\n\n// if (!Array.isArray(results) || results.length === 0) return null;\n\n// const lines = [];\n\n// for (const r of results) {\n//     // 현재 시간 사용 (미래 시간 문제 해결)\n//     const now = new Date();\n//     const timestamp = now.getTime();\n//     const tsNs = (BigInt(timestamp) * 1000000n).toString();\n\n//     node.log(`${r.chamber_id} DLI: ${r.dli.toFixed(4)} mol/m²/day (${r.data_points}개 측정)`);\n//     node.log(`저장 시간: ${new Date(timestamp).toISOString()}`);\n\n//     const tags = [\n//         `org_id=KIST`,\n//         `site_id=site_001`,\n//         `chamber_id=${r.chamber_id}`\n//     ].join(',');\n\n//     const fields = [\n//         `dli=${r.dli.toFixed(6)}`,\n//         `data_points=${r.data_points}i`\n//     ].join(',');\n\n//     lines.push(`kocDLI,${tags} ${fields} ${tsNs}`);\n// }\n\n// msg.payload = lines.join('\\n');\n// node.log(`DLI ${results.length}개 챔버 저장 준비`);\n\n// return msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 840,
+        "y": 340,
+        "wires": [
+            [
+                "091adaa414912b54",
+                "cadad03de8b8aa8c"
+            ]
+        ]
+    },
+    {
+        "id": "091adaa414912b54",
+        "type": "http request",
+        "z": "7e65b47e49f97f97",
+        "name": "InfluxDB DLI 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 1090,
+        "y": 340,
+        "wires": [
+            [
+                "b1706864b938c1c3"
+            ]
+        ]
+    },
+    {
+        "id": "28a89bf73713079f",
+        "type": "inject",
+        "z": "7e65b47e49f97f97",
+        "name": "수동 DLI 계산",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "once": false,
+        "payload": "calculate_dli",
+        "x": 370,
+        "y": 380,
+        "wires": [
+            [
+                "0c1c9c473d7ff9cd"
+            ]
+        ]
+    },
+    {
+        "id": "8c910b015b13860e",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "debug 2",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 600,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "b1706864b938c1c3",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "debug 5",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1280,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "1ba225e3825d71a3",
+        "type": "comment",
+        "z": "7e65b47e49f97f97",
+        "name": "Debug",
+        "info": "",
+        "x": 210,
+        "y": 660,
+        "wires": []
+    },
+    {
+        "id": "4759087b5a292106",
+        "type": "inject",
+        "z": "7e65b47e49f97f97",
+        "name": "실시간 DLI 업데이트",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "300",
+        "crontab": "",
+        "once": false,
+        "onceDelay": "",
+        "topic": "",
+        "payload": "realtime_update",
+        "payloadType": "str",
+        "x": 400,
+        "y": 480,
+        "wires": [
+            [
+                "811ee743d65df9bc"
+            ]
+        ]
+    },
+    {
+        "id": "811ee743d65df9bc",
+        "type": "function",
+        "z": "7e65b47e49f97f97",
+        "name": "고정키 실시간 DLI",
+        "func": "const dliData = global.get('dli_accumulation') || {};\n\nconst now = new Date();\nconst today = now.toISOString().split('T')[0];\n\n// 현재 시간 사용 (가장 중요!)\nconst currentTime = now.getTime();\nconst currentTsNs = (BigInt(currentTime) * 1000000n).toString();\n\nconst lines = [];\n// const chambers = ['chamber_001', 'chamber_002', 'chamber_003', 'chamber_004', 'chamber_005'];\nconst chambers = ['chamber_001', 'chamber_002', 'chamber_003', 'chamber_004'];\n\n// 디버깅 로그\nnode.log(`현재 시간: ${now.toISOString()}`);\nnode.log(`타임스탬프(ms): ${currentTime}`);\nnode.log(`타임스탬프(ns): ${currentTsNs}`);\n\n// 하루 진행률 계산\nconst dayStart = new Date(today + 'T00:00:00.000Z').getTime();\nconst dayProgress = ((now.getTime() - dayStart) / (24 * 60 * 60 * 1000) * 100);\nconst progressPercent = Math.min(dayProgress, 100).toFixed(1);\n\nchambers.forEach(chamberId => {\n    const key = `${chamberId}_${today}`;\n    const data = dliData[key];\n    \n    if (data) {\n        const currentDLI = (data.accumulated_par / 1000000).toFixed(6);\n        \n        const tags = [\n            `org_id=KIST`,\n            `site_id=site_001`,\n            `chamber_id=${chamberId}`,\n            `type=realtime`\n        ].join(',');\n        \n        const fields = [\n            `current_dli=${currentDLI}`,\n            `data_points=${data.data_points}i`,\n            `progress_percent=${progressPercent}`\n        ].join(',');\n        \n        lines.push(`kocLiveDLI,${tags} ${fields} ${currentTsNs}`);\n        \n        node.log(`[${chamberId}] DLI: ${currentDLI} mol/m²/day`);\n    } else {\n        const tags = [\n            `org_id=KIST`,\n            `site_id=site_001`,\n            `chamber_id=${chamberId}`,\n            `type=realtime`\n        ].join(',');\n        \n        const fields = [\n            `current_dli=0.000000`,\n            `data_points=0i`,\n            `progress_percent=${progressPercent}`\n        ].join(',');\n        \n        lines.push(`kocLiveDLI,${tags} ${fields} ${currentTsNs}`);\n    }\n});\n\nmsg.payload = lines.join('\\n');\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 630,
+        "y": 480,
+        "wires": [
+            [
+                "85f3f83c8720728b",
+                "1d1673dceccd9927"
+            ]
+        ]
+    },
+    {
+        "id": "85f3f83c8720728b",
+        "type": "http request",
+        "z": "7e65b47e49f97f97",
+        "name": "실시간 DLI InfluxDB 저장",
+        "method": "POST",
+        "ret": "txt",
+        "url": "http://influxdb2:8086/api/v2/write?org=KIST&bucket=KISTopenChamber&precision=ns",
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "valueType": "other",
+                "valueValue": "text/plain; charset=utf-8"
+            }
+        ],
+        "x": 870,
+        "y": 480,
+        "wires": [
+            [
+                "5275599803ec4d1e"
+            ]
+        ]
+    },
+    {
+        "id": "1d1673dceccd9927",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "실시간 DLI Line Protocol",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 870,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "5275599803ec4d1e",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "InfluxDB 응답",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 1090,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "56dc413e6e19bea3",
+        "type": "inject",
+        "z": "7e65b47e49f97f97",
+        "name": "DLI 누적 상태 확인",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": "",
+        "topic": "",
+        "payload": "status",
+        "payloadType": "str",
+        "x": 390,
+        "y": 660,
+        "wires": [
+            [
+                "ffac81211585bd89"
+            ]
+        ]
+    },
+    {
+        "id": "ffac81211585bd89",
+        "type": "function",
+        "z": "7e65b47e49f97f97",
+        "name": "현재 DLI 누적 상태",
+        "func": "// =====================================================\n// 3. \"현재 DLI 누적 상태\" 노드 - UTC로 수정\n// =====================================================\n\nconst dliData = global.get('dli_accumulation') || {};\n\n// UTC 기준 오늘 날짜 (한국시간 변환 제거)\nconst now = new Date();\nconst today = now.toISOString().split('T')[0]; // UTC 날짜 사용\n\nnode.log('===== 현재 DLI 누적 상태 =====');\n\nconst result = [];\nlet todayCount = 0;\n\nfor (const key in dliData) {\n    if (key.endsWith(`_${today}`)) {\n        const data = dliData[key];\n        const currentDLI = (data.accumulated_par / 1000000).toFixed(2);\n        \n        result.push({\n            chamber_id: data.chamber_id,\n            date: today,\n            current_dli: parseFloat(currentDLI),\n            data_points: data.data_points\n        });\n        \n        node.log(`[${data.chamber_id}] ${today} 현재 DLI: ${currentDLI} mol/m²/day (${data.data_points}개 측정)`);\n        todayCount++;\n    }\n}\n\nif (todayCount === 0) {\n    node.log(`${today} 누적 데이터 없음`);\n    node.log(`저장소 키 목록: ${Object.keys(dliData).join(', ')}`);\n}\n\nnode.log('==============================');\n\nmsg.payload = result;\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 630,
+        "y": 660,
+        "wires": [
+            [
+                "0d8ce43994135bda"
+            ]
+        ]
+    },
+    {
+        "id": "0d8ce43994135bda",
+        "type": "debug",
+        "z": "7e65b47e49f97f97",
+        "name": "DLI 상태",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 850,
+        "y": 660,
+        "wires": []
+    },
+    {
+        "id": "6473468f1fb0ce1b",
+        "type": "comment",
+        "z": "7e65b47e49f97f97",
+        "name": "Debug",
+        "info": "",
+        "x": 210,
+        "y": 380,
+        "wires": []
+    },
+    {
+        "id": "b41a40fdd4b3a87f",
+        "type": "http in",
+        "z": "f037c979601d240a",
+        "name": "GET /download-csv-new",
+        "url": "/download-csv",
+        "method": "get",
+        "upload": false,
+        "skipBodyParsing": false,
+        "swaggerDoc": "",
+        "x": 400,
+        "y": 200,
+        "wires": [
+            [
+                "1ca03b03e6b1e18f"
+            ]
+        ]
+    },
+    {
+        "id": "1ca03b03e6b1e18f",
+        "type": "function",
+        "z": "f037c979601d240a",
+        "name": "새 CSV 처리기",
+        "func": "const q = msg.req.query || {};\nconst startDate = q.startDate;\nconst endDate = q.endDate;\nconst chamber = q.chamber_id || 'chamber_001';\nconst fields = q.fields ? q.fields.split(',') : ['pyrRaw', 'tRaw', 'hRaw', 'co2Raw'];\n\nnode.log('CSV 다운로드: ' + chamber + ', ' + startDate + ' ~ ' + endDate);\nnode.log('요청된 필드: ' + fields.join(', '));\n\nif (!startDate || !endDate) {\n  msg.statusCode = 400;\n  msg.payload = { error: '시작일과 종료일이 필요합니다' };\n  return msg;\n}\n\n// 필드 분류\nconst sensorFields = fields.filter(f => ['pyrRaw', 'tRaw', 'hRaw', 'co2Raw', 'tBME', 'hBME'].includes(f));\nconst controlFields = fields.filter(f => ['led_actual_status', 'mode', 'onoffValue', 'setPoint', 'avgTime'].includes(f));\nconst dliFields = fields.filter(f => ['current_dli', 'dli'].includes(f));\n\nlet queryParts = [];\n\n// 센서 데이터 쿼리\nif (sensorFields.length > 0) {\n  const sensorFilter = sensorFields.map(f => `r._field == \"${f}\"`).join(' or ');\n  queryParts.push(`sensorData = from(bucket: \"KISTopenChamber\")\n  |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n  |> filter(fn: (r) => r._measurement == \"kocData\" and r.chamber_id == \"${chamber}\" and (${sensorFilter}))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")`);\n}\n\n// 제어 데이터 쿼리\nif (controlFields.length > 0) {\n  const controlFilter = controlFields.map(f => `r._field == \"${f}\"`).join(' or ');\n  queryParts.push(`controlData = from(bucket: \"KISTopenChamber\")\n  |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n  |> filter(fn: (r) => r._measurement == \"kocControl\" and r.chamber_id == \"${chamber}\" and (${controlFilter}))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")`);\n}\n\n// 실시간 DLI 쿼리\nif (dliFields.includes('current_dli')) {\n  queryParts.push(`liveDliData = from(bucket: \"KISTopenChamber\")\n  |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n  |> filter(fn: (r) => r._measurement == \"kocLiveDLI\" and r.chamber_id == \"${chamber}\" and r._field == \"current_dli\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")`);\n}\n\n// 일일 DLI 쿼리\nif (dliFields.includes('dli')) {\n  queryParts.push(`dailyDliData = from(bucket: \"KISTopenChamber\")\n  |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n  |> filter(fn: (r) => r._measurement == \"kocDLI\" and r.chamber_id == \"${chamber}\" and r._field == \"dli\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")`);\n}\n\nif (queryParts.length === 0) {\n  msg.statusCode = 400;\n  msg.payload = { error: '유효한 필드가 선택되지 않았습니다' };\n  return msg;\n}\n\n// 쿼리 조합\nlet combinedQuery;\nif (queryParts.length === 1) {\n  // 단일 데이터 소스 - keep 제거\n  combinedQuery = queryParts[0].replace(/^\\w+Data = /, '') + '\\n  |> sort(columns: [\"_time\"])';\n} else {\n  // 여러 데이터 소스 결합\n  const tableNames = [];\n  if (sensorFields.length > 0) tableNames.push('sensorData');\n  if (controlFields.length > 0) tableNames.push('controlData');\n  if (dliFields.includes('current_dli')) tableNames.push('liveDliData');\n  if (dliFields.includes('dli')) tableNames.push('dailyDliData');\n\n  combinedQuery = queryParts.join('\\n\\n') + `\\n\\nunion(tables: [${tableNames.join(', ')}])\n  |> group()\n  |> sort(columns: [\"_time\"])`;\n}\n\nnode.log('생성된 쿼리:');\nnode.log(combinedQuery);\n\nmsg.payload = combinedQuery;\nmsg.chamber = chamber;\nmsg.startDate = startDate;\nmsg.endDate = endDate;\nmsg.originalFields = fields;\n\nreturn msg;\n\n// const q = msg.req.query || {};\n// const startDate = q.startDate;\n// const endDate = q.endDate;\n// const chamber = q.chamber_id || 'chamber_001';\n// const fields = q.fields ? q.fields.split(',') : ['pyrRaw','tRaw','hRaw','co2Raw'];\n\n// node.log('=== 새 CSV 다운로드 ===');\n// node.log('요청 필드: ' + fields.join(', '));\n\n// if (!startDate || !endDate) {\n//     msg.statusCode = 400;\n//     msg.payload = { error: '시작일과 종료일이 필요합니다' };\n//     return msg;\n// }\n\n// // 하나의 통합 쿼리로 모든 데이터 가져오기\n// const sensorFields = fields.filter(f => ['pyrRaw', 'tRaw', 'hRaw', 'co2Raw'].includes(f));\n// const controlFields = fields.filter(f => ['led_actual_status', 'mode', 'onoffValue', 'setPoint'].includes(f));\n// const hasDli = fields.includes('current_dli') || fields.includes('dli');\n\n// let combinedQuery = '';\n// let queryParts = [];\n\n// // 센서 데이터 쿼리\n// if (sensorFields.length > 0) {\n//     const sensorFilter = sensorFields.map(f => `r._field == \"${f}\"`).join(' or ');\n//     queryParts.push(`\n// // 센서 데이터\n// sensorData = from(bucket: \"KISTopenChamber\")\n//   |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n//   |> filter(fn: (r) => r._measurement == \"kocData\" and r.chamber_id == \"${chamber}\" and (${sensorFilter}))\n//   |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n//   |> map(fn: (r) => ({_time: r._time, pyrRaw: r.pyrRaw, tRaw: r.tRaw, hRaw: r.hRaw, co2Raw: r.co2Raw}))`);\n// }\n\n// // 제어 데이터 쿼리\n// if (controlFields.length > 0) {\n//     const controlFilter = controlFields.map(f => `r._field == \"${f}\"`).join(' or ');\n//     queryParts.push(`\n// // 제어 데이터\n// controlData = from(bucket: \"KISTopenChamber\")\n//   |> range(start: ${startDate}T00:00:00Z, stop: ${endDate}T23:59:59Z)\n//   |> filter(fn: (r) => r._measurement == \"kocControl\" and r.chamber_id == \"${chamber}\" and (${controlFilter}))\n//   |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n//   |> map(fn: (r) => ({_time: r._time, led_actual_status: r.led_actual_status, mode: r.mode, onoffValue: r.onoffValue, setPoint: r.setPoint}))`);\n// }\n\n// // 통합 쿼리 생성\n// if (sensorFields.length > 0 && controlFields.length > 0) {\n//     combinedQuery = queryParts.join('\\n') + `\n\n// // 데이터 결합\n// union(tables: [sensorData, controlData])\n//   |> group()\n//   |> sort(columns: [\"_time\"])`;\n// } else if (sensorFields.length > 0) {\n//     combinedQuery = queryParts[0].replace('sensorData = ', '') + '\\n  |> group()\\n  |> sort(columns: [\"_time\"])';\n// } else if (controlFields.length > 0) {\n//     combinedQuery = queryParts[0].replace('controlData = ', '') + '\\n  |> group()\\n  |> sort(columns: [\"_time\"])';\n// }\n\n// node.log('생성된 쿼리:');\n// node.log(combinedQuery);\n\n// msg.payload = combinedQuery;\n// msg.chamber = chamber;\n// msg.startDate = startDate;\n// msg.endDate = endDate;\n// msg.originalFields = fields;\n\n// return msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 640,
+        "y": 200,
+        "wires": [
+            [
+                "9a7adc3a6e6e5d32",
+                "726cc22e30451b2d"
+            ]
+        ]
+    },
+    {
+        "id": "9a7adc3a6e6e5d32",
+        "type": "http request",
+        "z": "f037c979601d240a",
+        "name": "새 InfluxDB 요청",
+        "method": "POST",
+        "ret": "txt",
+        "paytoqs": "ignore",
+        "url": "http://influxdb2:8086/api/v2/query?org=KIST",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Authorization",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "Token Bb-szpfIgXjnHyMy3_0W2-rCnawwbyDydUsKYydCq_7WEvw58eom_-cPUUyacrCRhr3p-Wk9WKM4PI7vqYQV9Q=="
+            },
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/vnd.flux"
+            },
+            {
+                "keyType": "Accept",
+                "keyValue": "",
+                "valueType": "other",
+                "valueValue": "application/csv"
+            }
+        ],
+        "x": 870,
+        "y": 200,
+        "wires": [
+            [
+                "a1d6208d4f3eaf59"
+            ]
+        ]
+    },
+    {
+        "id": "a1d6208d4f3eaf59",
+        "type": "function",
+        "z": "f037c979601d240a",
+        "name": "새 CSV 변환기",
+        "func": "\nconst fieldNameMap = {\n    // 센서 데이터\n    'pyrRaw': '일사량_Wm2',\n    'tRaw': '온도_C',\n    'hRaw': '습도_percent',\n    'co2Raw': 'CO2_ppm',\n    'tBME': '온도BME_C',\n    'hBME': '습도BME_percent',\n\n    // 제어 데이터\n    'led_actual_status': 'LED실제상태',\n    'mode': '제어모드',\n    'onoffValue': 'ON_OFF값',\n    'setPoint': '설정값',\n    'avgTime': '평균시간_분',\n\n    // DLI 데이터\n    'current_dli': '실시간DLI_mol_m2_day',\n    'dli': '일일DLI_mol_m2_day',\n\n    // 공통\n    '_time': '시간'\n};\n\nconst csvText = msg.payload || '';\n\nnode.log('받은 CSV 길이: ' + csvText.length);\n\nif (!csvText || csvText.length < 10) {\n    msg.statusCode = 404;\n    msg.payload = { error: '데이터가 없습니다' };\n    return msg;\n}\n\n// CSV 파싱 - InfluxDB 메타데이터 라인 제거\nconst lines = csvText.split(/\\r?\\n/).filter(line => {\n    const trimmed = line.trim();\n    return trimmed &&\n        !trimmed.startsWith('#') &&\n        !trimmed.startsWith('//');\n});\n\nif (lines.length < 2) {\n    msg.statusCode = 404;\n    msg.payload = { error: '유효한 데이터가 없습니다' };\n    return msg;\n}\n\nconst headers = lines[0].split(',').map(h => h.trim().replace(/\"/g, ''));\nnode.log('원본 헤더: ' + headers.join(', '));\n\n// 메타데이터 컬럼 제외\nconst excludeColumns = ['result', 'table', '_start', '_stop', '_measurement',\n    'chamber_id', 'collector_id', 'fw_version', 'org_id', 'site_id'];\nconst filteredHeaders = headers.filter(h => !excludeColumns.includes(h));\nconst mappedHeaders = filteredHeaders.map(h => fieldNameMap[h] || h);\n\nnode.log('한글 헤더: ' + mappedHeaders.join(', '));\n\n// CSV 재구성\nconst newLines = [mappedHeaders.join(',')];\n\nfor (let i = 1; i < lines.length; i++) {\n    const values = lines[i].split(',').map(v => v.trim().replace(/\"/g, ''));\n\n    const filteredValues = [];\n    filteredHeaders.forEach(header => {\n        const index = headers.indexOf(header);\n        filteredValues.push(index >= 0 ? (values[index] || '') : '');\n    });\n\n    newLines.push(filteredValues.join(','));\n}\n\nconst finalCSV = newLines.join('\\n');\n\nnode.log('최종 CSV: ' + newLines.length + '줄, ' + filteredHeaders.length + '열');\n\nmsg.payload = finalCSV;\nmsg.headers = {\n    'Content-Type': 'text/csv; charset=utf-8',\n    'Content-Disposition': 'attachment; filename=\"KIST_' + msg.chamber + '_' + msg.startDate + '_' + msg.endDate + '.csv\"',\n    'Access-Control-Allow-Origin': '*',\n    'Cache-Control': 'no-cache'\n};\nmsg.statusCode = 200;\n\nreturn msg;\n\n\n// const fieldNameMap = {\n//     'pyrRaw': '일사량_Wm2',\n//     'tRaw': '온도_C',\n//     'hRaw': '습도_percent',\n//     'co2Raw': 'CO2_ppm',\n//     'led_actual_status': 'LED실제상태',\n//     'mode': '제어모드',\n//     'onoffValue': 'ON_OFF값',\n//     'setPoint': '설정값',\n//     '_time': '시간'\n// };\n\n// const csvText = msg.payload || '';\n\n// node.log('받은 CSV 길이: ' + csvText.length);\n// node.log('첫 500자: ' + csvText.substring(0, 500));\n\n// if (!csvText || csvText.length < 10) {\n//     msg.statusCode = 404;\n//     msg.payload = { error: '데이터가 없습니다' };\n//     return msg;\n// }\n\n// // CSV 파싱\n// const lines = csvText.split(/\\r?\\n/).filter(line => {\n//     const trimmed = line.trim();\n//     return trimmed && \n//            !trimmed.startsWith('#') && \n//            !trimmed.startsWith('//');\n// });\n\n// if (lines.length < 2) {\n//     msg.statusCode = 404;\n//     msg.payload = { error: '유효한 데이터가 없습니다' };\n//     return msg;\n// }\n\n// const headers = lines[0].split(',').map(h => h.trim().replace(/\"/g, ''));\n// node.log('원본 헤더: ' + headers.join(', '));\n\n// // 헤더 한글화 (메타데이터 컬럼 제외)\n// const excludeColumns = ['result', 'table', '_start', '_stop', '_measurement', 'chamber_id', 'collector_id', 'fw_version', 'org_id', 'site_id'];\n// const filteredHeaders = headers.filter(h => !excludeColumns.includes(h));\n// const mappedHeaders = filteredHeaders.map(h => fieldNameMap[h] || h);\n\n// node.log('필터된 헤더: ' + filteredHeaders.join(', '));\n// node.log('한글 헤더: ' + mappedHeaders.join(', '));\n\n// // CSV 재구성\n// const newLines = [mappedHeaders.join(',')];\n\n// for (let i = 1; i < lines.length; i++) {\n//     const values = lines[i].split(',').map(v => v.trim().replace(/\"/g, ''));\n    \n//     // 필터된 헤더에 해당하는 값들만 추출\n//     const filteredValues = [];\n//     filteredHeaders.forEach(header => {\n//         const index = headers.indexOf(header);\n//         filteredValues.push(index >= 0 ? (values[index] || '') : '');\n//     });\n    \n//     newLines.push(filteredValues.join(','));\n// }\n\n// const finalCSV = newLines.join('\\n');\n\n// node.log('최종 CSV 생성: ' + newLines.length + '줄');\n// node.log('첫 3줄:');\n// for (let i = 0; i < Math.min(3, newLines.length); i++) {\n//     node.log('  ' + newLines[i]);\n// }\n\n// msg.payload = finalCSV;\n// msg.headers = {\n//     'Content-Type': 'text/csv; charset=utf-8',\n//     'Content-Disposition': 'attachment; filename=\"KIST_' + msg.chamber + '_' + msg.startDate + '_' + msg.endDate + '.csv\"',\n//     'Access-Control-Allow-Origin': '*',\n//     'Cache-Control': 'no-cache'\n// };\n// msg.statusCode = 200;\n\n// return msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1100,
+        "y": 200,
+        "wires": [
+            [
+                "9a181a64db21ff0f",
+                "f7413e0ad15af055"
+            ]
+        ]
+    },
+    {
+        "id": "9a181a64db21ff0f",
+        "type": "http response",
+        "z": "f037c979601d240a",
+        "name": "새 CSV 응답",
+        "statusCode": "",
+        "headers": {},
+        "x": 1310,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "726cc22e30451b2d",
+        "type": "debug",
+        "z": "f037c979601d240a",
+        "name": "debug 11",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 800,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "f7413e0ad15af055",
+        "type": "debug",
+        "z": "f037c979601d240a",
+        "name": "debug 12",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "false",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1260,
+        "y": 140,
+        "wires": []
+    }
+]
